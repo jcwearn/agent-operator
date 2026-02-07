@@ -51,7 +51,7 @@ func (h *Hub) Run(ctx context.Context) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		close(c.send)
-		c.conn.Close()
+		_ = c.conn.Close()
 		delete(h.clients, c)
 	}
 }
@@ -126,7 +126,7 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			s.hub.unregister(c)
-			conn.Close()
+			_ = conn.Close()
 		}()
 		for msg := range c.send {
 			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
@@ -139,7 +139,7 @@ func (s *APIServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			s.hub.unregister(c)
-			conn.Close()
+			_ = conn.Close()
 		}()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {

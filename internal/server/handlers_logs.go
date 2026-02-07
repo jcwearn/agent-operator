@@ -62,7 +62,7 @@ func (s *APIServer) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to stream logs")
 		return
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -79,7 +79,7 @@ func (s *APIServer) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 	scanner := bufio.NewScanner(stream)
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Fprintf(w, "data: %s\n\n", line)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", line)
 		flusher.Flush()
 
 		// Check if the client disconnected.
@@ -95,6 +95,6 @@ func (s *APIServer) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send end-of-stream event.
-	fmt.Fprintf(w, "event: done\ndata: stream ended\n\n")
+	_, _ = fmt.Fprintf(w, "event: done\ndata: stream ended\n\n")
 	flusher.Flush()
 }

@@ -121,7 +121,7 @@ func (s *APIServer) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	sourceFilter := r.URL.Query().Get("source")
 	phaseFilter := r.URL.Query().Get("phase")
 
-	var results []taskSummary
+	results := make([]taskSummary, 0, len(taskList.Items))
 	for _, t := range taskList.Items {
 		if sourceFilter != "" && string(t.Spec.Source.Type) != sourceFilter {
 			continue
@@ -185,13 +185,13 @@ type taskSummary struct {
 
 type taskDetail struct {
 	taskSummary
-	Prompt      string                              `json:"prompt"`
-	Plan        string                              `json:"plan,omitempty"`
-	AgentRuns   []agentsv1alpha1.AgentRunReference   `json:"agentRuns,omitempty"`
-	PullRequest *agentsv1alpha1.PullRequestInfo      `json:"pullRequest,omitempty"`
-	RetryCount  int                                  `json:"retryCount"`
-	StartedAt   string                               `json:"startedAt,omitempty"`
-	CompletedAt string                               `json:"completedAt,omitempty"`
+	Prompt      string                             `json:"prompt"`
+	Plan        string                             `json:"plan,omitempty"`
+	AgentRuns   []agentsv1alpha1.AgentRunReference `json:"agentRuns,omitempty"`
+	PullRequest *agentsv1alpha1.PullRequestInfo    `json:"pullRequest,omitempty"`
+	RetryCount  int                                `json:"retryCount"`
+	StartedAt   string                             `json:"startedAt,omitempty"`
+	CompletedAt string                             `json:"completedAt,omitempty"`
 }
 
 func toTaskSummary(t *agentsv1alpha1.CodingTask) taskSummary {

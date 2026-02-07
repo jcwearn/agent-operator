@@ -27,7 +27,7 @@ type APIServer struct {
 	hub       *Hub
 
 	// GitHub integration (optional).
-	githubClient       *ghclient.Client
+	githubClient        *ghclient.Client
 	githubWebhookSecret []byte
 
 	// Default secret refs for tasks created via API.
@@ -150,16 +150,16 @@ func (s *APIServer) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *APIServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok"))
 }
 
 // respondJSON writes a JSON response.
 func respondJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 // respondError writes a JSON error response.

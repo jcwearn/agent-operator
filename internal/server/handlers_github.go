@@ -47,7 +47,7 @@ func (s *APIServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (s *APIServer) handleIssuesEvent(ctx context.Context, event *gogithub.IssuesEvent) error {
