@@ -40,10 +40,16 @@ const (
 	workspaceVolumeName = "workspace"
 )
 
+// GitTokenProvider generates short-lived tokens for git operations.
+type GitTokenProvider interface {
+	Token() (string, error)
+}
+
 // AgentRunReconciler reconciles an AgentRun object.
 type AgentRunReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme           *runtime.Scheme
+	GitTokenProvider GitTokenProvider // optional; if set, injects a fresh token instead of using GitCredentialsRef
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -228,6 +234,13 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 	memRequest := memLimit.DeepCopy()
 	memRequest.Set(memLimit.Value() / 2)
 
+	// Build GIT_TOKEN env var — prefer fresh installation token from GitTokenProvider,
+	// fall back to static secret ref.
+	gitTokenEnv, err := r.buildGitTokenEnv(run)
+	if err != nil {
+		return nil, fmt.Errorf("building git token env: %w", err)
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -265,17 +278,7 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 								},
 							},
 						},
-						{
-							Name: "GIT_TOKEN",
-							ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: run.Spec.GitCredentialsRef.Name,
-									},
-									Key: run.Spec.GitCredentialsRef.Key,
-								},
-							},
-						},
+						gitTokenEnv,
 						{Name: "AGENT_STEP", Value: string(run.Spec.Step)},
 						{Name: "AGENT_REPO_URL", Value: run.Spec.Repository.URL},
 						{Name: "AGENT_BASE_BRANCH", Value: run.Spec.Repository.Branch},
@@ -375,6 +378,35 @@ func (r *AgentRunReconciler) extractOutput(pod *corev1.Pod) string {
 		}
 	}
 	return ""
+}
+
+// buildGitTokenEnv returns the GIT_TOKEN env var. If a GitTokenProvider is configured,
+// it mints a fresh installation token (valid ~1 hour). Otherwise falls back to a static
+// secret reference from the AgentRun spec.
+func (r *AgentRunReconciler) buildGitTokenEnv(run *agentsv1alpha1.AgentRun) (corev1.EnvVar, error) {
+	if r.GitTokenProvider != nil {
+		token, err := r.GitTokenProvider.Token()
+		if err != nil {
+			return corev1.EnvVar{}, fmt.Errorf("minting installation token: %w", err)
+		}
+		return corev1.EnvVar{
+			Name:  "GIT_TOKEN",
+			Value: token,
+		}, nil
+	}
+
+	// Fallback: use static secret ref.
+	return corev1.EnvVar{
+		Name: "GIT_TOKEN",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: run.Spec.GitCredentialsRef.Name,
+				},
+				Key: run.Spec.GitCredentialsRef.Key,
+			},
+		},
+	}, nil
 }
 
 func boolPtr(b bool) *bool    { return &b }

@@ -31,10 +31,34 @@ import (
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
 )
 
+// Notifier posts status updates to external systems (e.g., GitHub issues).
+type Notifier interface {
+	NotifyPlanReady(ctx context.Context, owner, repo string, issue int, plan string) error
+	NotifyStepUpdate(ctx context.Context, owner, repo string, issue int, step, status, msg string) error
+	NotifyComplete(ctx context.Context, owner, repo string, issue int, prURL string) error
+	NotifyFailed(ctx context.Context, owner, repo string, issue int, reason string) error
+}
+
+// Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
+type Broadcaster interface {
+	Broadcast(event BroadcastEvent)
+}
+
+// BroadcastEvent represents a task status change.
+type BroadcastEvent struct {
+	Type    string `json:"type"`
+	Task    string `json:"task"`
+	Phase   string `json:"phase"`
+	Step    string `json:"step,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 // CodingTaskReconciler reconciles a CodingTask object.
 type CodingTaskReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme      *runtime.Scheme
+	Notifier    Notifier    // optional, nil-safe
+	Broadcaster Broadcaster // optional, nil-safe
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
@@ -144,6 +168,10 @@ func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv
 		task.Status.RetryCount = 0
 		task.Status.Message = "Plan complete, starting implementation"
 		r.updateAgentRunRef(task, run)
+		r.broadcast(task)
+		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyPlanReady(ctx, owner, repo, issue, run.Status.Output)
+		})
 
 		prompt := fmt.Sprintf(`You are an implementation agent. Implement the following plan in the repository.
 
@@ -206,6 +234,10 @@ func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *age
 		task.Status.RetryCount = 0
 		task.Status.Message = "Implementation complete, running tests"
 		r.updateAgentRunRef(task, run)
+		r.broadcast(task)
+		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Starting tests")
+		})
 
 		prompt := fmt.Sprintf(`You are a testing agent. Run the test suite for the repository and verify the changes are correct.
 
@@ -267,6 +299,10 @@ func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1
 		task.Status.RetryCount = 0
 		task.Status.Message = "Tests passed, creating pull request"
 		r.updateAgentRunRef(task, run)
+		r.broadcast(task)
+		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Testing", "Succeeded", "Creating pull request")
+		})
 
 		prompt := fmt.Sprintf(`You are a pull request agent. Create a pull request for the completed work.
 
@@ -379,11 +415,18 @@ func (r *CodingTaskReconciler) handlePullRequest(ctx context.Context, task *agen
 		r.updateAgentRunRef(task, run)
 
 		// The output should contain the PR URL on the first line.
+		prURL := ""
 		if run.Status.Output != "" {
+			prURL = run.Status.Output
 			task.Status.PullRequest = &agentsv1alpha1.PullRequestInfo{
-				URL: run.Status.Output,
+				URL: prURL,
 			}
 		}
+
+		r.broadcast(task)
+		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyComplete(ctx, owner, repo, issue, prURL)
+		})
 
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, err
@@ -441,6 +484,11 @@ func (r *CodingTaskReconciler) failTask(ctx context.Context, task *agentsv1alpha
 	task.Status.Phase = agentsv1alpha1.TaskPhaseFailed
 	task.Status.CompletedAt = &now
 	task.Status.Message = message
+
+	r.broadcast(task)
+	r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+		return r.Notifier.NotifyFailed(ctx, owner, repo, issue, message)
+	})
 
 	if err := r.Status().Update(ctx, task); err != nil {
 		return ctrl.Result{}, err
@@ -537,6 +585,33 @@ func (r *CodingTaskReconciler) workBranch(task *agentsv1alpha1.CodingTask) strin
 		return task.Spec.Repository.WorkBranch
 	}
 	return fmt.Sprintf("ai/%s", task.Name)
+}
+
+// notify sends a notification if the task originated from a GitHub issue and a Notifier is configured.
+func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.CodingTask, fn func(ctx context.Context, owner, repo string, issue int) error) {
+	if r.Notifier == nil {
+		return
+	}
+	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		return
+	}
+	gh := task.Spec.Source.GitHub
+	if err := fn(ctx, gh.Owner, gh.Repo, gh.IssueNumber); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to send notification")
+	}
+}
+
+// broadcast sends a real-time event if a Broadcaster is configured.
+func (r *CodingTaskReconciler) broadcast(task *agentsv1alpha1.CodingTask) {
+	if r.Broadcaster == nil {
+		return
+	}
+	r.Broadcaster.Broadcast(BroadcastEvent{
+		Type:    "task_update",
+		Task:    task.Name,
+		Phase:   string(task.Status.Phase),
+		Message: task.Status.Message,
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.

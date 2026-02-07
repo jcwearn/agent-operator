@@ -160,8 +160,9 @@ type CodingTaskSpec struct {
 	AnthropicAPIKeyRef SecretReference `json:"anthropicApiKeyRef"`
 
 	// gitCredentialsRef references the Secret containing Git credentials (e.g., GitHub token).
-	// +required
-	GitCredentialsRef SecretReference `json:"gitCredentialsRef"`
+	// Optional when the operator is configured with a GitHub App (tokens are minted automatically).
+	// +optional
+	GitCredentialsRef SecretReference `json:"gitCredentialsRef,omitempty"`
 
 	// maxRetries is the maximum number of retries per step on failure.
 	// +kubebuilder:default=3
