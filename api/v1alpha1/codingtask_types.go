@@ -147,7 +147,7 @@ type CodingTaskSpec struct {
 	Prompt string `json:"prompt"`
 
 	// agentImage is the container image for agent pods.
-	// +kubebuilder:default="ghcr.io/jcwearn/agent-runner:latest"
+	// +kubebuilder:default="ghcr.io/jcwearn/agent-runner:main"
 	// +optional
 	AgentImage string `json:"agentImage,omitempty"`
 

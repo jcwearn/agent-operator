@@ -74,8 +74,9 @@ spec:
                   test error output from a failed run, etc.).
                 type: string
               gitCredentialsRef:
-                description: gitCredentialsRef references the Secret containing Git
-                  credentials.
+                description: |-
+                  gitCredentialsRef references the Secret containing Git credentials.
+                  Optional when the operator is configured with a GitHub App (tokens are minted automatically).
                 properties:
                   key:
                     description: key is the key within the Secret.
@@ -88,7 +89,7 @@ spec:
                 - name
                 type: object
               image:
-                default: ghcr.io/jcwearn/agent-runner:latest
+                default: ghcr.io/jcwearn/agent-runner:main
                 description: image is the container image for the agent pod.
                 type: string
               prompt:
@@ -155,7 +156,6 @@ spec:
                 type: string
             required:
             - anthropicApiKeyRef
-            - gitCredentialsRef
             - prompt
             - repository
             - step
