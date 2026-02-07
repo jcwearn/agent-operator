@@ -56,7 +56,7 @@ spec:
             description: CodingTaskSpec defines the desired state of CodingTask.
             properties:
               agentImage:
-                default: ghcr.io/jcwearn/agent-runner:latest
+                default: ghcr.io/jcwearn/agent-runner:main
                 description: agentImage is the container image for agent pods.
                 type: string
               anthropicApiKeyRef:
@@ -74,8 +74,9 @@ spec:
                 - name
                 type: object
               gitCredentialsRef:
-                description: gitCredentialsRef references the Secret containing Git
-                  credentials (e.g., GitHub token).
+                description: |-
+                  gitCredentialsRef references the Secret containing Git credentials (e.g., GitHub token).
+                  Optional when the operator is configured with a GitHub App (tokens are minted automatically).
                 properties:
                   key:
                     description: key is the key within the Secret.
@@ -235,7 +236,6 @@ spec:
                 type: array
             required:
             - anthropicApiKeyRef
-            - gitCredentialsRef
             - prompt
             - repository
             - source

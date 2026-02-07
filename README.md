@@ -163,7 +163,7 @@ kubectl logs -n agent-system -l agents.wearn.dev/task=add-healthcheck -f
 | `spec.repository.branch` | Base branch | `main` |
 | `spec.repository.workBranch` | Branch for agent changes | `ai/<task-name>` |
 | `spec.prompt` | Task instructions | required |
-| `spec.agentImage` | Container image for agent pods | `ghcr.io/jcwearn/agent-runner:latest` |
+| `spec.agentImage` | Container image for agent pods | `ghcr.io/jcwearn/agent-runner:main` |
 | `spec.resources.cpu` | CPU limit per agent pod | `4` |
 | `spec.resources.memory` | Memory limit per agent pod | `8Gi` |
 | `spec.anthropicApiKeyRef` | Secret reference for Anthropic API key | required |
