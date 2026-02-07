@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -27,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -37,6 +39,8 @@ import (
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
 	"github.com/jcwearn/agent-operator/internal/controller"
+	ghclient "github.com/jcwearn/agent-operator/internal/github"
+	"github.com/jcwearn/agent-operator/internal/server"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -44,6 +48,15 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// hubBroadcaster adapts server.Hub to the controller.Broadcaster interface.
+type hubBroadcaster struct {
+	hub *server.Hub
+}
+
+func (h *hubBroadcaster) Broadcast(event controller.BroadcastEvent) {
+	h.hub.BroadcastMessage(event)
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -178,17 +191,81 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.CodingTaskReconciler{
+	// Set up GitHub client if configured via environment variables.
+	var ghClient *ghclient.Client
+	var ghNotifier *ghclient.Notifier
+	if appIDStr := os.Getenv("GITHUB_APP_ID"); appIDStr != "" {
+		appID, err := strconv.ParseInt(appIDStr, 10, 64)
+		if err != nil {
+			setupLog.Error(err, "invalid GITHUB_APP_ID")
+			os.Exit(1)
+		}
+		installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
+		if err != nil {
+			setupLog.Error(err, "invalid GITHUB_INSTALLATION_ID")
+			os.Exit(1)
+		}
+		privateKey := []byte(os.Getenv("GITHUB_PRIVATE_KEY"))
+		ghClient, err = ghclient.NewClient(appID, installationID, privateKey)
+		if err != nil {
+			setupLog.Error(err, "unable to create GitHub client")
+			os.Exit(1)
+		}
+		ghNotifier = ghclient.NewNotifier(ghClient)
+		setupLog.Info("GitHub App integration enabled", "appID", appID, "installationID", installationID)
+	}
+
+	// Set up API server.
+	apiOpts := []server.Option{
+		server.WithTaskNamespace("agent-system"),
+	}
+	if name := os.Getenv("ANTHROPIC_SECRET_NAME"); name != "" {
+		apiOpts = append(apiOpts, server.WithAnthropicSecret(name, "api-key"))
+	}
+	if ghClient != nil {
+		apiOpts = append(apiOpts, server.WithGitHubClient(ghClient))
+		if secret := os.Getenv("GITHUB_WEBHOOK_SECRET"); secret != "" {
+			apiOpts = append(apiOpts, server.WithGitHubWebhookSecret([]byte(secret)))
+		}
+	}
+
+	// Create typed clientset for pod log streaming.
+	clientset, err := kubernetes.NewForConfig(ctrl.GetConfigOrDie())
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes clientset")
+		os.Exit(1)
+	}
+	apiOpts = append(apiOpts, server.WithClientset(clientset))
+
+	apiServer := server.NewAPIServer(mgr.GetClient(), ":8090", apiOpts...)
+
+	if err := mgr.Add(apiServer); err != nil {
+		setupLog.Error(err, "unable to add API server to manager")
+		os.Exit(1)
+	}
+
+	// Set up controllers.
+	codingTaskReconciler := &controller.CodingTaskReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if ghNotifier != nil {
+		codingTaskReconciler.Notifier = ghNotifier
+	}
+	codingTaskReconciler.Broadcaster = &hubBroadcaster{hub: apiServer.GetHub()}
+
+	if err := codingTaskReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CodingTask")
 		os.Exit(1)
 	}
-	if err := (&controller.AgentRunReconciler{
+	agentRunReconciler := &controller.AgentRunReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if ghClient != nil {
+		agentRunReconciler.GitTokenProvider = ghClient
+	}
+	if err := agentRunReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}

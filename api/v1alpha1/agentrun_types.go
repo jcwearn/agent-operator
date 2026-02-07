@@ -80,8 +80,9 @@ type AgentRunSpec struct {
 	AnthropicAPIKeyRef SecretReference `json:"anthropicApiKeyRef"`
 
 	// gitCredentialsRef references the Secret containing Git credentials.
-	// +required
-	GitCredentialsRef SecretReference `json:"gitCredentialsRef"`
+	// Optional when the operator is configured with a GitHub App (tokens are minted automatically).
+	// +optional
+	GitCredentialsRef SecretReference `json:"gitCredentialsRef,omitempty"`
 
 	// serviceAccountName is the K8s service account for the agent pod.
 	// +kubebuilder:default="agent-runner"
