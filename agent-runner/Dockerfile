@@ -1,0 +1,47 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Core system dependencies.
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    wget \
+    build-essential \
+    ca-certificates \
+    gnupg \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js (LTS) for Claude Code CLI.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI.
+RUN npm install -g @anthropic-ai/claude-code
+
+# GitHub CLI.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user.
+RUN groupadd -g 1000 agent && useradd -m -u 1000 -g agent agent
+
+# Create required directories.
+RUN mkdir -p /agent/output /agent/workspace && \
+    chown -R agent:agent /agent
+
+# Copy entrypoint.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER agent
+WORKDIR /agent/workspace
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

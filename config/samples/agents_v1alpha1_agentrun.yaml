@@ -1,0 +1,9 @@
+apiVersion: agents.wearn.dev/v1alpha1
+kind: AgentRun
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: agentrun-sample
+spec:
+  # TODO(user): Add fields here

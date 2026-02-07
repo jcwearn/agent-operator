@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- agents_v1alpha1_codingtask.yaml
+- agents_v1alpha1_agentrun.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

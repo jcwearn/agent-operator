@@ -1,0 +1,264 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: agentruns.agents.wearn.dev
+spec:
+  group: agents.wearn.dev
+  names:
+    kind: AgentRun
+    listKind: AgentRunList
+    plural: agentruns
+    singular: agentrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.taskRef
+      name: Task
+      type: string
+    - jsonPath: .spec.step
+      name: Step
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentRun is the Schema for the agentruns API.
+          It represents a single step execution within a CodingTask workflow.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AgentRunSpec defines the desired state of AgentRun.
+            properties:
+              anthropicApiKeyRef:
+                description: anthropicAPIKeyRef references the Secret containing the
+                  Anthropic API key.
+                properties:
+                  key:
+                    description: key is the key within the Secret.
+                    type: string
+                  name:
+                    description: name is the name of the Secret.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              context:
+                description: |-
+                  context provides additional context from previous steps (e.g., the plan text,
+                  test error output from a failed run, etc.).
+                type: string
+              gitCredentialsRef:
+                description: gitCredentialsRef references the Secret containing Git
+                  credentials.
+                properties:
+                  key:
+                    description: key is the key within the Secret.
+                    type: string
+                  name:
+                    description: name is the name of the Secret.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              image:
+                default: ghcr.io/jcwearn/agent-runner:latest
+                description: image is the container image for the agent pod.
+                type: string
+              prompt:
+                description: prompt is the step-specific prompt with context for the
+                  agent.
+                minLength: 1
+                type: string
+              repository:
+                description: repository defines the target Git repository (copied
+                  from parent CodingTask).
+                properties:
+                  branch:
+                    default: main
+                    description: branch is the base branch to work from (e.g., "main").
+                    type: string
+                  url:
+                    description: url is the Git clone URL for the repository.
+                    type: string
+                  workBranch:
+                    description: |-
+                      workBranch is the branch the agent will create for its changes.
+                      If empty, one will be generated from the task name.
+                    type: string
+                required:
+                - url
+                type: object
+              resources:
+                description: resources defines resource limits for the agent pod.
+                properties:
+                  cpu:
+                    default: "4"
+                    description: cpu is the CPU limit for agent pods (e.g., "4").
+                    type: string
+                  memory:
+                    default: 8Gi
+                    description: memory is the memory limit for agent pods (e.g.,
+                      "8Gi").
+                    type: string
+                  storage:
+                    default: 20Gi
+                    description: storage is the PVC size for the workspace (e.g.,
+                      "20Gi").
+                    type: string
+                type: object
+              serviceAccountName:
+                default: agent-runner
+                description: serviceAccountName is the K8s service account for the
+                  agent pod.
+                type: string
+              step:
+                description: step is which workflow step this run corresponds to.
+                enum:
+                - plan
+                - implement
+                - test
+                - pull-request
+                type: string
+              taskRef:
+                description: taskRef is the name of the parent CodingTask.
+                type: string
+              timeout:
+                default: 30m
+                description: timeout is the maximum duration for this run (e.g., "30m").
+                type: string
+            required:
+            - anthropicApiKeyRef
+            - gitCredentialsRef
+            - prompt
+            - repository
+            - step
+            - taskRef
+            type: object
+          status:
+            description: AgentRunStatus defines the observed state of AgentRun.
+            properties:
+              completedAt:
+                description: completedAt is when the agent pod finished.
+                format: date-time
+                type: string
+              conditions:
+                description: conditions represent the current state of the AgentRun.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              exitCode:
+                description: exitCode is the exit code of the agent container.
+                format: int32
+                type: integer
+              message:
+                description: message provides a human-readable status message.
+                type: string
+              output:
+                description: output is the agent's primary output (e.g., plan text,
+                  test results, PR URL).
+                type: string
+              phase:
+                description: phase is the current phase of this run.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                type: string
+              podName:
+                description: podName is the name of the pod running this agent step.
+                type: string
+              startedAt:
+                description: startedAt is when the agent pod started.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

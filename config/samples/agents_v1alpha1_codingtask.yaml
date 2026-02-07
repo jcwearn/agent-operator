@@ -1,0 +1,31 @@
+apiVersion: agents.wearn.dev/v1alpha1
+kind: CodingTask
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: codingtask-sample
+  namespace: agent-system
+spec:
+  source:
+    type: chat
+    chat:
+      sessionId: "example-session"
+      userId: "jackson"
+  repository:
+    url: https://github.com/jcwearn/example-repo.git
+    branch: main
+  prompt: "Add a health check endpoint to the API server at /healthz that returns a 200 OK"
+  agentImage: ghcr.io/jcwearn/agent-runner:latest
+  resources:
+    cpu: "4"
+    memory: "8Gi"
+    storage: "20Gi"
+  anthropicApiKeyRef:
+    name: agent-secrets
+    key: anthropic-api-key
+  gitCredentialsRef:
+    name: agent-secrets
+    key: github-token
+  maxRetries: 3
+  stepTimeout: "30m"
