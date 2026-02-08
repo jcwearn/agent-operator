@@ -89,8 +89,9 @@ spec:
                 - name
                 type: object
               image:
-                default: ghcr.io/jcwearn/agent-runner:main
-                description: image is the container image for the agent pod.
+                description: |-
+                  image is the container image for the agent pod.
+                  If empty, the operator's DEFAULT_AGENT_IMAGE env var is used.
                 type: string
               maxTurns:
                 description: maxTurns limits the number of agentic turns for this

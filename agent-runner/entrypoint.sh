@@ -57,11 +57,11 @@ git config --global user.email "agent@wearn.dev"
 git config --global user.name "Agent Operator"
 
 # Authenticate GitHub CLI and configure git to use it for credentials.
-# This is more reliable in containers than GH_TOKEN env var alone, since
-# gh auth login writes a persistent config that survives subprocess spawning.
-export GH_TOKEN="$GIT_TOKEN"
+# GH_TOKEN must NOT be exported yet — gh auth login refuses to store credentials
+# when it detects GH_TOKEN already in the environment.
 echo "$GIT_TOKEN" | gh auth login --with-token 2>&1 || fail "gh auth login failed"
 gh auth setup-git 2>&1 || fail "gh auth setup-git failed"
+export GH_TOKEN="$GIT_TOKEN"
 log "GitHub CLI authenticated: $(gh auth status 2>&1 | head -1)"
 
 # Clone the repository.

@@ -246,8 +246,9 @@ func main() {
 
 	// Set up controllers.
 	codingTaskReconciler := &controller.CodingTaskReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		DefaultAgentImage: os.Getenv("DEFAULT_AGENT_IMAGE"),
 	}
 	if ghNotifier != nil {
 		codingTaskReconciler.Notifier = ghNotifier

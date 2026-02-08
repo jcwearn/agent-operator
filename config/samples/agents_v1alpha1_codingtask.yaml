@@ -16,7 +16,6 @@ spec:
     url: https://github.com/jcwearn/example-repo.git
     branch: main
   prompt: "Add a health check endpoint to the API server at /healthz that returns a 200 OK"
-  agentImage: ghcr.io/jcwearn/agent-runner:main
   resources:
     cpu: "4"
     memory: "8Gi"

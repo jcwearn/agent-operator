@@ -58,7 +58,7 @@ type AgentRunSpec struct {
 	Prompt string `json:"prompt"`
 
 	// image is the container image for the agent pod.
-	// +kubebuilder:default="ghcr.io/jcwearn/agent-runner:main"
+	// If empty, the operator's DEFAULT_AGENT_IMAGE env var is used.
 	// +optional
 	Image string `json:"image,omitempty"`
 
