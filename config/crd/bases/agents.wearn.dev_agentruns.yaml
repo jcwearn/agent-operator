@@ -92,6 +92,14 @@ spec:
                 default: ghcr.io/jcwearn/agent-runner:main
                 description: image is the container image for the agent pod.
                 type: string
+              maxTurns:
+                description: maxTurns limits the number of agentic turns for this
+                  run.
+                type: integer
+              model:
+                description: model is the Claude model to use for this run (e.g.,
+                  "sonnet", "opus").
+                type: string
               prompt:
                 description: prompt is the step-specific prompt with context for the
                   agent.

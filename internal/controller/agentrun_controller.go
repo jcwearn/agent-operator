@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -285,6 +286,8 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 						{Name: "AGENT_WORK_BRANCH", Value: run.Spec.Repository.WorkBranch},
 						{Name: "AGENT_PROMPT", Value: run.Spec.Prompt},
 						{Name: "AGENT_CONTEXT", Value: run.Spec.Context},
+						{Name: "AGENT_MODEL", Value: run.Spec.Model},
+						{Name: "AGENT_MAX_TURNS", Value: intPtrToString(run.Spec.MaxTurns)},
 						{Name: "AGENT_OUTPUT_DIR", Value: outputMountPath},
 						{Name: "AGENT_WORKSPACE_DIR", Value: workspaceMountPath},
 					},
@@ -411,6 +414,13 @@ func (r *AgentRunReconciler) buildGitTokenEnv(run *agentsv1alpha1.AgentRun) (cor
 
 func boolPtr(b bool) *bool    { return &b }
 func int64Ptr(i int64) *int64 { return &i }
+
+func intPtrToString(p *int) string {
+	if p == nil {
+		return ""
+	}
+	return strconv.Itoa(*p)
+}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {

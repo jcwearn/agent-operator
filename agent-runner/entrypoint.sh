@@ -58,6 +58,7 @@ REPO_HOST=$(echo "$AGENT_REPO_URL" | sed -n 's|https://\([^/]*\)/.*|\1|p')
 echo "https://oauth2:${GIT_TOKEN}@${REPO_HOST}" > ~/.git-credentials
 git config --global user.email "agent@wearn.dev"
 git config --global user.name "Agent Operator"
+export GH_TOKEN="$GIT_TOKEN"
 
 # Clone the repository.
 log "Cloning repository..."
@@ -103,9 +104,14 @@ Context from previous steps:
 ${AGENT_CONTEXT}"
 fi
 
+# Build Claude CLI arguments.
+CLAUDE_ARGS="--print --dangerously-skip-permissions"
+[ -n "${AGENT_MODEL:-}" ] && CLAUDE_ARGS="$CLAUDE_ARGS --model $AGENT_MODEL"
+[ -n "${AGENT_MAX_TURNS:-}" ] && CLAUDE_ARGS="$CLAUDE_ARGS --max-turns $AGENT_MAX_TURNS"
+
 # Run Claude Code in non-interactive mode.
-log "Running Claude Code..."
-CLAUDE_OUTPUT=$(claude --print --dangerously-skip-permissions "$FULL_PROMPT" 2>&1) || {
+log "Running Claude Code with args: $CLAUDE_ARGS"
+CLAUDE_OUTPUT=$(claude $CLAUDE_ARGS "$FULL_PROMPT" 2>&1) || {
     log "Claude Code exited with non-zero status"
     write_output "$CLAUDE_OUTPUT"
     exit 1

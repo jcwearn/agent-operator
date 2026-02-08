@@ -93,6 +93,14 @@ type AgentRunSpec struct {
 	// test error output from a failed run, etc.).
 	// +optional
 	Context string `json:"context,omitempty"`
+
+	// model is the Claude model to use for this run (e.g., "sonnet", "opus").
+	// +optional
+	Model string `json:"model,omitempty"`
+
+	// maxTurns limits the number of agentic turns for this run.
+	// +optional
+	MaxTurns *int `json:"maxTurns,omitempty"`
 }
 
 // AgentRunStatus defines the observed state of AgentRun.

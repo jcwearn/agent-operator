@@ -31,17 +31,18 @@ const (
 )
 
 // TaskPhase defines the current phase of a CodingTask.
-// +kubebuilder:validation:Enum=Pending;Planning;Implementing;Testing;PullRequest;Complete;Failed
+// +kubebuilder:validation:Enum=Pending;Planning;AwaitingApproval;Implementing;Testing;PullRequest;Complete;Failed
 type TaskPhase string
 
 const (
-	TaskPhasePending      TaskPhase = "Pending"
-	TaskPhasePlanning     TaskPhase = "Planning"
-	TaskPhaseImplementing TaskPhase = "Implementing"
-	TaskPhaseTesting      TaskPhase = "Testing"
-	TaskPhasePullRequest  TaskPhase = "PullRequest"
-	TaskPhaseComplete     TaskPhase = "Complete"
-	TaskPhaseFailed       TaskPhase = "Failed"
+	TaskPhasePending          TaskPhase = "Pending"
+	TaskPhasePlanning         TaskPhase = "Planning"
+	TaskPhaseAwaitingApproval TaskPhase = "AwaitingApproval"
+	TaskPhaseImplementing     TaskPhase = "Implementing"
+	TaskPhaseTesting          TaskPhase = "Testing"
+	TaskPhasePullRequest      TaskPhase = "PullRequest"
+	TaskPhaseComplete         TaskPhase = "Complete"
+	TaskPhaseFailed           TaskPhase = "Failed"
 )
 
 // GitHubSource contains information about a GitHub issue source.
@@ -131,6 +132,34 @@ type SecretReference struct {
 	Key string `json:"key"`
 }
 
+// ModelConfig configures which Claude model to use for each workflow step.
+type ModelConfig struct {
+	// default is the model used when no step-specific override is set.
+	// +kubebuilder:default="sonnet"
+	// +optional
+	Default string `json:"default,omitempty"`
+
+	// plan overrides the model for the planning step.
+	// +optional
+	Plan string `json:"plan,omitempty"`
+
+	// implement overrides the model for the implementation step.
+	// +optional
+	Implement string `json:"implement,omitempty"`
+
+	// test overrides the model for the testing step.
+	// +optional
+	Test string `json:"test,omitempty"`
+
+	// pullRequest overrides the model for the pull request step.
+	// +optional
+	PullRequest string `json:"pullRequest,omitempty"`
+
+	// maxTurns limits the number of agentic turns per step.
+	// +optional
+	MaxTurns *int `json:"maxTurns,omitempty"`
+}
+
 // CodingTaskSpec defines the desired state of CodingTask.
 type CodingTaskSpec struct {
 	// source defines where the task originated.
@@ -163,6 +192,10 @@ type CodingTaskSpec struct {
 	// Optional when the operator is configured with a GitHub App (tokens are minted automatically).
 	// +optional
 	GitCredentialsRef SecretReference `json:"gitCredentialsRef,omitempty"`
+
+	// model configures which Claude model to use for each workflow step.
+	// +optional
+	Model ModelConfig `json:"model,omitempty"`
 
 	// maxRetries is the maximum number of retries per step on failure.
 	// +kubebuilder:default=3
@@ -237,6 +270,11 @@ type CodingTaskStatus struct {
 	// +optional
 	AgentRuns []AgentRunReference `json:"agentRuns,omitempty"`
 
+	// planCommentID is the GitHub comment ID where the plan was posted,
+	// used for tracking approval reactions.
+	// +optional
+	PlanCommentID *int64 `json:"planCommentID,omitempty"`
+
 	// pullRequest contains info about the created PR, if any.
 	// +optional
 	PullRequest *PullRequestInfo `json:"pullRequest,omitempty"`
@@ -252,6 +290,11 @@ type CodingTaskStatus struct {
 	// message provides a human-readable status message.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// notifiedPhases tracks which notification keys have already been sent,
+	// preventing duplicate notifications on re-reconciliation.
+	// +optional
+	NotifiedPhases []string `json:"notifiedPhases,omitempty"`
 
 	// conditions represent the current state of the CodingTask.
 	// +listType=map
