@@ -51,7 +51,7 @@ type AgentRunReconciler struct {
 	client.Client
 	Scheme             *runtime.Scheme
 	GitTokenProvider   GitTokenProvider // optional; if set, injects a fresh token instead of using GitCredentialsRef
-	PodRetentionPeriod time.Duration   // how long to keep succeeded pods; 0 means delete immediately
+	PodRetentionPeriod time.Duration    // how long to keep succeeded pods; 0 means delete immediately
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
