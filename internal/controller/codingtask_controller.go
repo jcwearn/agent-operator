@@ -283,6 +283,10 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 		task.Status.CurrentStep = 1
 		task.Status.RetryCount = 0
 		task.Status.PlanCommentID = nil
+		// Clear "plan-ready" from NotifiedPhases so the revised plan comment gets posted.
+		task.Status.NotifiedPhases = slices.DeleteFunc(task.Status.NotifiedPhases, func(s string) bool {
+			return s == "plan-ready"
+		})
 		task.Status.Message = "Re-planning with reviewer feedback"
 		r.broadcast(task)
 

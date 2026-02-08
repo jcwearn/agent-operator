@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	gogithub "github.com/google/go-github/v68/github"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Notifier posts status updates to GitHub issues.
@@ -53,34 +53,31 @@ func (n *Notifier) NotifyFailed(ctx context.Context, owner, repo string, issue i
 // or if a human has left feedback as a reply. When approved, it also parses the
 // plan comment body to determine whether the "Run tests" checkbox was checked.
 func (n *Notifier) CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, runTests bool, feedback string, err error) {
-	// Check reactions on the plan comment.
-	reactions, _, err := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
-		&gogithub.ListOptions{PerPage: 100})
-	if err != nil {
-		return false, false, "", fmt.Errorf("listing reactions: %w", err)
-	}
-	hasApproval := false
-	for _, r := range reactions {
-		if r.GetContent() == "+1" {
-			hasApproval = true
-			break
-		}
-	}
+	log := logf.FromContext(ctx)
 
-	if hasApproval {
-		// Fetch the plan comment to check the test checkbox state.
-		comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
-		if err != nil {
-			return true, false, "", nil // approved but can't read checkbox — default to no tests
+	// Check reactions on the plan comment.
+	reactions, _, reactErr := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
+		&gogithub.ListOptions{PerPage: 100})
+	if reactErr != nil {
+		// Log but don't return — fall through to comment feedback check.
+		log.Error(reactErr, "failed to list reactions, falling back to comment check")
+	} else {
+		for _, r := range reactions {
+			if r.GetContent() == "+1" {
+				// Fetch the plan comment to check the test checkbox state.
+				comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
+				if err != nil {
+					return true, false, "", nil // approved but can't read checkbox — default to no tests
+				}
+				runTests = strings.Contains(comment.GetBody(), "- [x] Run tests before creating PR")
+				return true, runTests, "", nil
+			}
 		}
-		runTests = strings.Contains(comment.GetBody(), "- [x] Run tests before creating PR")
-		return true, runTests, "", nil
 	}
 
 	// Check for human comments posted after the plan comment.
 	comments, _, err := n.client.Issues.ListComments(ctx, owner, repo, issue,
 		&gogithub.IssueListCommentsOptions{
-			Since:       &time.Time{},
 			ListOptions: gogithub.ListOptions{PerPage: 100},
 		})
 	if err != nil {
