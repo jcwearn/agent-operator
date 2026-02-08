@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	gogithub "github.com/google/go-github/v68/github"
@@ -20,7 +21,7 @@ func NewNotifier(client *Client) *Notifier {
 
 // NotifyPlanReady posts the generated plan as a comment and returns the comment ID.
 func (n *Notifier) NotifyPlanReady(ctx context.Context, owner, repo string, issue int, plan string) (int64, error) {
-	body := fmt.Sprintf("## Implementation Plan\n\n%s\n\n---\n\n**To approve this plan**, react with :+1: on this comment.\n**To request changes**, reply to this issue with your feedback.", plan)
+	body := fmt.Sprintf("## Implementation Plan\n\n%s\n\n---\n\n- [ ] Run tests before creating PR\n\n**To approve this plan**, react with :+1: on this comment.\n**To request changes**, reply to this issue with your feedback.", plan)
 	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
 		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
 	if err != nil {
@@ -49,18 +50,31 @@ func (n *Notifier) NotifyFailed(ctx context.Context, owner, repo string, issue i
 }
 
 // CheckApproval checks if the plan comment has been approved via a thumbs-up reaction,
-// or if a human has left feedback as a reply.
-func (n *Notifier) CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, feedback string, err error) {
+// or if a human has left feedback as a reply. When approved, it also parses the
+// plan comment body to determine whether the "Run tests" checkbox was checked.
+func (n *Notifier) CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, runTests bool, feedback string, err error) {
 	// Check reactions on the plan comment.
 	reactions, _, err := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
 		&gogithub.ListOptions{PerPage: 100})
 	if err != nil {
-		return false, "", fmt.Errorf("listing reactions: %w", err)
+		return false, false, "", fmt.Errorf("listing reactions: %w", err)
 	}
+	hasApproval := false
 	for _, r := range reactions {
 		if r.GetContent() == "+1" {
-			return true, "", nil
+			hasApproval = true
+			break
 		}
+	}
+
+	if hasApproval {
+		// Fetch the plan comment to check the test checkbox state.
+		comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
+		if err != nil {
+			return true, false, "", nil // approved but can't read checkbox — default to no tests
+		}
+		runTests = strings.Contains(comment.GetBody(), "- [x] Run tests before creating PR")
+		return true, runTests, "", nil
 	}
 
 	// Check for human comments posted after the plan comment.
@@ -70,17 +84,17 @@ func (n *Notifier) CheckApproval(ctx context.Context, owner, repo string, issue 
 			ListOptions: gogithub.ListOptions{PerPage: 100},
 		})
 	if err != nil {
-		return false, "", fmt.Errorf("listing comments: %w", err)
+		return false, false, "", fmt.Errorf("listing comments: %w", err)
 	}
 
 	for _, c := range comments {
 		// Only consider comments posted after the plan comment and not from bots.
 		if c.GetID() > commentID && c.GetUser() != nil && c.GetUser().GetType() != "Bot" {
-			return false, c.GetBody(), nil
+			return false, false, c.GetBody(), nil
 		}
 	}
 
-	return false, "", nil
+	return false, false, "", nil
 }
 
 func (n *Notifier) postComment(ctx context.Context, owner, repo string, issue int, body string) error {
