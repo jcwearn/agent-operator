@@ -17,10 +17,10 @@ import (
 )
 
 const (
-	defaultMaxTokens   int64 = 4096
-	maxToolUseRounds         = 10
-	finishReasonStop         = "stop"
-	defaultBranchName        = "main"
+	defaultMaxTokens  int64 = 4096
+	maxToolUseRounds        = 10
+	finishReasonStop        = "stop"
+	defaultBranchName       = "main"
 )
 
 const systemPrompt = `You are Claude, an AI assistant integrated with an agentic coding platform. You can help users with questions and also create coding tasks that will be executed by autonomous coding agents.
