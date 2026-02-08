@@ -68,8 +68,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          NOTES_FLAG=""
+          if [ "${{ steps.version.outputs.latest }}" != "v0.0.0" ]; then
+            NOTES_FLAG="--notes-start-tag ${{ steps.version.outputs.latest }}"
+          fi
           gh release create "${{ steps.version.outputs.next }}" \
             --target main \
             --title "${{ steps.version.outputs.next }}" \
             --generate-notes \
-            --notes-start-tag "${{ steps.version.outputs.latest }}"
+            $NOTES_FLAG
