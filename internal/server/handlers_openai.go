@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	sdkanthropic "github.com/anthropics/anthropic-sdk-go"
@@ -15,7 +16,12 @@ import (
 	anthropicpkg "github.com/jcwearn/agent-operator/internal/anthropic"
 )
 
-const defaultMaxTokens int64 = 4096
+const (
+	defaultMaxTokens   int64 = 4096
+	maxToolUseRounds         = 10
+	finishReasonStop         = "stop"
+	defaultBranchName        = "main"
+)
 
 const systemPrompt = `You are Claude, an AI assistant integrated with an agentic coding platform. You can help users with questions and also create coding tasks that will be executed by autonomous coding agents.
 
@@ -81,7 +87,7 @@ func (s *APIServer) handleChatCompletions(w http.ResponseWriter, r *http.Request
 // It runs an agentic tool-use loop: if the model returns tool_use blocks,
 // we execute them and continue the conversation until a final text response.
 func (s *APIServer) handleNonStreamingChat(w http.ResponseWriter, r *http.Request, params sdkanthropic.MessageNewParams, model string) {
-	for i := 0; i < 10; i++ { // max 10 tool-use rounds
+	for range maxToolUseRounds {
 		msg, err := s.anthropicClient.Chat(r.Context(), params)
 		if err != nil {
 			s.log.Error(err, "anthropic chat error")
@@ -150,7 +156,7 @@ func (s *APIServer) handleStreamingChat(w http.ResponseWriter, r *http.Request, 
 		Delta: anthropicpkg.ChatChunkDelta{Role: "assistant"},
 	})
 
-	for round := 0; round < 10; round++ {
+	for range maxToolUseRounds {
 		stream, err := s.anthropicClient.ChatStream(r.Context(), params)
 		if err != nil {
 			s.log.Error(err, "anthropic stream error")
@@ -212,11 +218,11 @@ func (s *APIServer) handleStreamingChat(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Send final done.
-	finishReason := "stop"
+	fr := finishReasonStop
 	s.sendSSEChunk(w, flusher, msgID, model, created, &anthropicpkg.ChatChunkChoice{
 		Index:        0,
 		Delta:        anthropicpkg.ChatChunkDelta{},
-		FinishReason: &finishReason,
+		FinishReason: &fr,
 	})
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
@@ -312,7 +318,7 @@ func (s *APIServer) buildTools() []sdkanthropic.ToolUnionParam {
 
 // processToolCalls executes tool calls from a message and returns tool result blocks.
 func (s *APIServer) processToolCalls(r *http.Request, msg *sdkanthropic.Message) ([]sdkanthropic.ContentBlockParamUnion, bool) {
-	var results []sdkanthropic.ContentBlockParamUnion
+	results := make([]sdkanthropic.ContentBlockParamUnion, 0, len(msg.Content))
 	hasToolUse := false
 
 	for _, block := range msg.Content {
@@ -362,7 +368,7 @@ func (s *APIServer) toolCreateTask(r *http.Request, input json.RawMessage) (stri
 
 	branch := in.Branch
 	if branch == "" {
-		branch = "main"
+		branch = defaultBranchName
 	}
 
 	taskName := fmt.Sprintf("task-%d", metav1.Now().UnixMilli())
@@ -530,26 +536,26 @@ func (s *APIServer) toolApproveTask(r *http.Request, input json.RawMessage) (str
 
 // extractText extracts all text content from a message.
 func extractText(msg *sdkanthropic.Message) string {
-	var text string
+	var b strings.Builder
 	for _, block := range msg.Content {
 		if block.Type == "text" {
-			text += block.Text
+			b.WriteString(block.Text)
 		}
 	}
-	return text
+	return b.String()
 }
 
 // mapStopReason maps Anthropic stop reasons to OpenAI finish reasons.
 func mapStopReason(reason sdkanthropic.StopReason) string {
 	switch reason {
 	case sdkanthropic.StopReasonEndTurn:
-		return "stop"
+		return finishReasonStop
 	case sdkanthropic.StopReasonMaxTokens:
 		return "length"
 	case sdkanthropic.StopReasonToolUse:
 		return "tool_calls"
 	default:
-		return "stop"
+		return finishReasonStop
 	}
 }
 

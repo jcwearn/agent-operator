@@ -39,8 +39,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
-	"github.com/jcwearn/agent-operator/internal/controller"
 	anthropicpkg "github.com/jcwearn/agent-operator/internal/anthropic"
+	"github.com/jcwearn/agent-operator/internal/controller"
 	ghclient "github.com/jcwearn/agent-operator/internal/github"
 	"github.com/jcwearn/agent-operator/internal/server"
 	// +kubebuilder:scaffold:imports

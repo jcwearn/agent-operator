@@ -43,19 +43,19 @@ type CompletionUsage struct {
 
 // ChatCompletionChunk is the OpenAI-compatible streaming chunk.
 type ChatCompletionChunk struct {
-	ID      string              `json:"id"`
-	Object  string              `json:"object"`
-	Created int64               `json:"created"`
-	Model   string              `json:"model"`
-	Choices []ChatChunkChoice   `json:"choices"`
-	Usage   *CompletionUsage    `json:"usage,omitempty"`
+	ID      string            `json:"id"`
+	Object  string            `json:"object"`
+	Created int64             `json:"created"`
+	Model   string            `json:"model"`
+	Choices []ChatChunkChoice `json:"choices"`
+	Usage   *CompletionUsage  `json:"usage,omitempty"`
 }
 
 // ChatChunkChoice is a single choice in a streaming chunk.
 type ChatChunkChoice struct {
-	Index        int             `json:"index"`
-	Delta        ChatChunkDelta  `json:"delta"`
-	FinishReason *string         `json:"finish_reason"`
+	Index        int            `json:"index"`
+	Delta        ChatChunkDelta `json:"delta"`
+	FinishReason *string        `json:"finish_reason"`
 }
 
 // ChatChunkDelta is the delta content in a streaming chunk.
