@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
+	anthropicpkg "github.com/jcwearn/agent-operator/internal/anthropic"
 	"github.com/jcwearn/agent-operator/internal/controller"
 	ghclient "github.com/jcwearn/agent-operator/internal/github"
 	"github.com/jcwearn/agent-operator/internal/server"
@@ -237,6 +238,18 @@ func main() {
 		os.Exit(1)
 	}
 	apiOpts = append(apiOpts, server.WithClientset(clientset))
+
+	// Set up Anthropic client for OpenAI-compatible chat endpoint.
+	anthropicSecretName := "anthropic-api-key"
+	if name := os.Getenv("ANTHROPIC_SECRET_NAME"); name != "" {
+		anthropicSecretName = name
+	}
+	anthropicNs := "agent-system"
+	if ns := os.Getenv("TASK_NAMESPACE"); ns != "" {
+		anthropicNs = ns
+	}
+	anthropicClient := anthropicpkg.NewClient(mgr.GetClient(), anthropicNs, anthropicSecretName, "api-key")
+	apiOpts = append(apiOpts, server.WithAnthropicClient(anthropicClient))
 
 	apiServer := server.NewAPIServer(mgr.GetClient(), ":8090", apiOpts...)
 

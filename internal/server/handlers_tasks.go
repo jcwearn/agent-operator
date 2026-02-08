@@ -50,7 +50,7 @@ func (s *APIServer) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	branch := req.Branch
 	if branch == "" {
-		branch = "main"
+		branch = defaultBranchName
 	}
 
 	// Build the task source.

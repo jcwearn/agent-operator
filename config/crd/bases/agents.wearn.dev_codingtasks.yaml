@@ -431,6 +431,30 @@ spec:
               totalSteps:
                 description: totalSteps is the total number of steps in the workflow.
                 type: integer
+              trackingIssue:
+                description: |-
+                  trackingIssue references the GitHub issue tracking this task.
+                  For chat-created tasks, this is the auto-created issue.
+                  For GitHub-created tasks, this is populated from the source.
+                properties:
+                  issueNumber:
+                    description: issueNumber is the GitHub issue number.
+                    type: integer
+                  owner:
+                    description: owner is the GitHub repository owner.
+                    type: string
+                  repo:
+                    description: repo is the GitHub repository name.
+                    type: string
+                  url:
+                    description: url is the web URL of the issue.
+                    type: string
+                required:
+                - issueNumber
+                - owner
+                - repo
+                - url
+                type: object
             type: object
         required:
         - spec

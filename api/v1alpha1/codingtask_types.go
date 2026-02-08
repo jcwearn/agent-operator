@@ -223,6 +223,21 @@ type CodingTaskSpec struct {
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
+// GitHubIssueRef is a reference to a GitHub issue for tracking purposes.
+type GitHubIssueRef struct {
+	// owner is the GitHub repository owner.
+	Owner string `json:"owner"`
+
+	// repo is the GitHub repository name.
+	Repo string `json:"repo"`
+
+	// issueNumber is the GitHub issue number.
+	IssueNumber int `json:"issueNumber"`
+
+	// url is the web URL of the issue.
+	URL string `json:"url"`
+}
+
 // PullRequestInfo contains information about the created pull request.
 type PullRequestInfo struct {
 	// url is the web URL of the pull request.
@@ -279,6 +294,12 @@ type CodingTaskStatus struct {
 	// used for tracking approval reactions.
 	// +optional
 	PlanCommentID *int64 `json:"planCommentID,omitempty"`
+
+	// trackingIssue references the GitHub issue tracking this task.
+	// For chat-created tasks, this is the auto-created issue.
+	// For GitHub-created tasks, this is populated from the source.
+	// +optional
+	TrackingIssue *GitHubIssueRef `json:"trackingIssue,omitempty"`
 
 	// pullRequest contains info about the created PR, if any.
 	// +optional

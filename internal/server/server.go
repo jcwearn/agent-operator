@@ -14,6 +14,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	anthropicpkg "github.com/jcwearn/agent-operator/internal/anthropic"
 	ghclient "github.com/jcwearn/agent-operator/internal/github"
 )
 
@@ -29,6 +30,9 @@ type APIServer struct {
 	// GitHub integration (optional).
 	githubClient        *ghclient.Client
 	githubWebhookSecret []byte
+
+	// Anthropic client for OpenAI-compatible chat endpoint.
+	anthropicClient *anthropicpkg.Client
 
 	// Default secret refs for tasks created via API.
 	anthropicSecretName string
@@ -50,6 +54,13 @@ func WithGitHubClient(c *ghclient.Client) Option {
 func WithGitHubWebhookSecret(secret []byte) Option {
 	return func(s *APIServer) {
 		s.githubWebhookSecret = secret
+	}
+}
+
+// WithAnthropicClient sets the Anthropic client for the OpenAI-compatible endpoint.
+func WithAnthropicClient(c *anthropicpkg.Client) Option {
+	return func(s *APIServer) {
+		s.anthropicClient = c
 	}
 }
 
@@ -97,6 +108,10 @@ func NewAPIServer(c client.Client, addr string, opts ...Option) *APIServer {
 	r.Use(middleware.RequestID)
 
 	r.Get("/healthz", s.handleHealthz)
+
+	// OpenAI-compatible endpoints at top-level /v1/ path.
+	r.Get("/v1/models", s.handleListModels)
+	r.Post("/v1/chat/completions", s.handleChatCompletions)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/tasks", s.handleCreateTask)
