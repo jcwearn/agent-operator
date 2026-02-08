@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,10 +34,15 @@ import (
 
 // Notifier posts status updates to external systems (e.g., GitHub issues).
 type Notifier interface {
-	NotifyPlanReady(ctx context.Context, owner, repo string, issue int, plan string) error
+	NotifyPlanReady(ctx context.Context, owner, repo string, issue int, plan string) (int64, error)
 	NotifyStepUpdate(ctx context.Context, owner, repo string, issue int, step, status, msg string) error
 	NotifyComplete(ctx context.Context, owner, repo string, issue int, prURL string) error
 	NotifyFailed(ctx context.Context, owner, repo string, issue int, reason string) error
+}
+
+// ApprovalChecker checks whether a plan has been approved via GitHub reactions or comments.
+type ApprovalChecker interface {
+	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, feedback string, err error)
 }
 
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
@@ -56,9 +62,10 @@ type BroadcastEvent struct {
 // CodingTaskReconciler reconciles a CodingTask object.
 type CodingTaskReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	Notifier    Notifier    // optional, nil-safe
-	Broadcaster Broadcaster // optional, nil-safe
+	Scheme          *runtime.Scheme
+	Notifier        Notifier        // optional, nil-safe
+	Broadcaster     Broadcaster     // optional, nil-safe
+	ApprovalChecker ApprovalChecker // optional; if nil, plans are auto-approved
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
@@ -77,7 +84,7 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Initialize status if this is a new task.
 	if task.Status.Phase == "" {
 		task.Status.Phase = agentsv1alpha1.TaskPhasePending
-		task.Status.TotalSteps = 4
+		task.Status.TotalSteps = 5
 		task.Status.CurrentStep = 0
 		if err := r.Status().Update(ctx, &task); err != nil {
 			return ctrl.Result{}, err
@@ -96,6 +103,8 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.handlePending(ctx, &task)
 	case agentsv1alpha1.TaskPhasePlanning:
 		return r.handlePlanning(ctx, &task)
+	case agentsv1alpha1.TaskPhaseAwaitingApproval:
+		return r.handleAwaitingApproval(ctx, &task)
 	case agentsv1alpha1.TaskPhaseImplementing:
 		return r.handleImplementing(ctx, &task)
 	case agentsv1alpha1.TaskPhaseTesting:
@@ -129,6 +138,7 @@ Instructions:
 3. Break the work into clear, ordered steps
 4. Consider edge cases and testing requirements
 5. Output your plan as structured markdown
+6. If there are technical or product decisions to make, list them clearly as questions so the reviewer can provide guidance before implementation begins
 
 Output ONLY the plan — no code implementation.`, task.Spec.Prompt)
 
@@ -150,7 +160,7 @@ Output ONLY the plan — no code implementation.`, task.Spec.Prompt)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-// handlePlanning checks if the planning AgentRun has completed and transitions accordingly.
+// handlePlanning checks if the planning AgentRun has completed and transitions to AwaitingApproval.
 func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
 	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepPlan)
 	if err != nil {
@@ -163,41 +173,15 @@ func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
 		task.Status.Plan = run.Status.Output
-		task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
+		task.Status.Phase = agentsv1alpha1.TaskPhaseAwaitingApproval
 		task.Status.CurrentStep = 2
 		task.Status.RetryCount = 0
-		task.Status.Message = "Plan complete, starting implementation"
+		task.Status.Message = "Plan ready, awaiting approval"
 		r.updateAgentRunRef(task, run)
 		r.broadcast(task)
-		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
-			return r.Notifier.NotifyPlanReady(ctx, owner, repo, issue, run.Status.Output)
-		})
 
-		prompt := fmt.Sprintf(`You are an implementation agent. Implement the following plan in the repository.
-
-Original Task: %s
-
-Plan:
-%s
-
-Instructions:
-1. Create a new branch: %s
-2. Implement all changes described in the plan
-3. Write tests that cover the changes
-4. Commit your changes with a descriptive commit message
-5. Do NOT open a pull request — that will be handled separately
-
-Output a summary of what you implemented and any notes for the tester.`, task.Spec.Prompt, task.Status.Plan, r.workBranch(task))
-
-		newRun, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement, prompt, task.Status.Plan)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating implement AgentRun: %w", err)
-		}
-		task.Status.AgentRuns = append(task.Status.AgentRuns, agentsv1alpha1.AgentRunReference{
-			Name:  newRun.Name,
-			Step:  agentsv1alpha1.AgentRunStepImplement,
-			Phase: agentsv1alpha1.AgentRunPhasePending,
-		})
+		// Post the plan as a comment and store the comment ID for approval tracking.
+		r.notifyPlanReady(ctx, task, run.Status.Output)
 
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, err
@@ -217,6 +201,126 @@ Output a summary of what you implemented and any notes for the tester.`, task.Sp
 	}
 }
 
+// handleAwaitingApproval polls for plan approval (thumbs-up reaction or comment feedback).
+func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// If no ApprovalChecker is configured, auto-approve.
+	if r.ApprovalChecker == nil {
+		log.Info("no approval checker configured, auto-approving plan")
+		return r.transitionToImplementing(ctx, task)
+	}
+
+	// Need a plan comment ID to check approval.
+	if task.Status.PlanCommentID == nil {
+		log.Info("no plan comment ID, auto-approving")
+		return r.transitionToImplementing(ctx, task)
+	}
+
+	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		return r.transitionToImplementing(ctx, task)
+	}
+
+	gh := task.Spec.Source.GitHub
+	approved, feedback, err := r.ApprovalChecker.CheckApproval(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.PlanCommentID)
+	if err != nil {
+		log.Error(err, "failed to check approval")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if approved {
+		log.Info("plan approved via reaction")
+		return r.transitionToImplementing(ctx, task)
+	}
+
+	if feedback != "" {
+		// Feedback received — re-plan with the feedback incorporated.
+		log.Info("feedback received, re-planning", "feedback", feedback)
+		task.Status.Phase = agentsv1alpha1.TaskPhasePlanning
+		task.Status.CurrentStep = 1
+		task.Status.RetryCount = 0
+		task.Status.PlanCommentID = nil
+		task.Status.Message = "Re-planning with reviewer feedback"
+		r.broadcast(task)
+
+		prompt := fmt.Sprintf(`You are a planning agent. Your previous plan received feedback from a reviewer. Revise the plan based on their feedback.
+
+Task: %s
+
+Previous Plan:
+%s
+
+Reviewer Feedback:
+%s
+
+Instructions:
+1. Address the reviewer's feedback
+2. Revise the plan accordingly
+3. Keep the same structured markdown format
+4. If there are technical or product decisions to make, list them clearly as questions so the reviewer can provide guidance before implementation begins
+
+Output ONLY the revised plan — no code implementation.`, task.Spec.Prompt, task.Status.Plan, feedback)
+
+		run, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepPlan, prompt, feedback)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("creating re-plan AgentRun: %w", err)
+		}
+		task.Status.AgentRuns = append(task.Status.AgentRuns, agentsv1alpha1.AgentRunReference{
+			Name:  run.Name,
+			Step:  agentsv1alpha1.AgentRunStepPlan,
+			Phase: agentsv1alpha1.AgentRunPhasePending,
+		})
+
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Neither approved nor feedback — requeue and check again.
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// transitionToImplementing moves a task from AwaitingApproval to Implementing.
+func (r *CodingTaskReconciler) transitionToImplementing(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
+	task.Status.CurrentStep = 3
+	task.Status.RetryCount = 0
+	task.Status.Message = "Plan approved, starting implementation"
+	r.broadcast(task)
+
+	prompt := fmt.Sprintf(`You are an implementation agent. Implement the following plan in the repository.
+
+Original Task: %s
+
+Plan:
+%s
+
+Instructions:
+1. Create a new branch: %s
+2. Implement all changes described in the plan
+3. Write tests that cover the changes
+4. Commit your changes with a descriptive commit message
+5. Do NOT open a pull request — that will be handled separately
+
+Output a summary of what you implemented and any notes for the tester.`, task.Spec.Prompt, task.Status.Plan, r.workBranch(task))
+
+	newRun, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement, prompt, task.Status.Plan)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("creating implement AgentRun: %w", err)
+	}
+	task.Status.AgentRuns = append(task.Status.AgentRuns, agentsv1alpha1.AgentRunReference{
+		Name:  newRun.Name,
+		Step:  agentsv1alpha1.AgentRunStepImplement,
+		Phase: agentsv1alpha1.AgentRunPhasePending,
+	})
+
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
 // handleImplementing checks if the implementation AgentRun has completed.
 func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
 	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement)
@@ -224,18 +328,19 @@ func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *age
 		return ctrl.Result{}, err
 	}
 	if run == nil {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		// No implement run exists yet — create one (e.g., after API-based approval).
+		return r.transitionToImplementing(ctx, task)
 	}
 
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
 		task.Status.Phase = agentsv1alpha1.TaskPhaseTesting
-		task.Status.CurrentStep = 3
+		task.Status.CurrentStep = 4
 		task.Status.RetryCount = 0
 		task.Status.Message = "Implementation complete, running tests"
 		r.updateAgentRunRef(task, run)
 		r.broadcast(task)
-		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+		r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Starting tests")
 		})
 
@@ -295,12 +400,12 @@ func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
 		task.Status.Phase = agentsv1alpha1.TaskPhasePullRequest
-		task.Status.CurrentStep = 4
+		task.Status.CurrentStep = 5
 		task.Status.RetryCount = 0
 		task.Status.Message = "Tests passed, creating pull request"
 		r.updateAgentRunRef(task, run)
 		r.broadcast(task)
-		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+		r.notify(ctx, task, "test-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Testing", "Succeeded", "Creating pull request")
 		})
 
@@ -345,7 +450,7 @@ Output the PR URL as the first line, followed by the PR description.`,
 		if task.Status.RetryCount < task.Spec.MaxRetries {
 			task.Status.RetryCount++
 			task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
-			task.Status.CurrentStep = 2
+			task.Status.CurrentStep = 3
 			task.Status.Message = fmt.Sprintf("Tests failed (attempt %d/%d), retrying implementation", task.Status.RetryCount, task.Spec.MaxRetries)
 			r.updateAgentRunRef(task, run)
 
@@ -424,7 +529,7 @@ func (r *CodingTaskReconciler) handlePullRequest(ctx context.Context, task *agen
 		}
 
 		r.broadcast(task)
-		r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+		r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyComplete(ctx, owner, repo, issue, prURL)
 		})
 
@@ -486,7 +591,7 @@ func (r *CodingTaskReconciler) failTask(ctx context.Context, task *agentsv1alpha
 	task.Status.Message = message
 
 	r.broadcast(task)
-	r.notify(ctx, task, func(ctx context.Context, owner, repo string, issue int) error {
+	r.notify(ctx, task, "failed", func(ctx context.Context, owner, repo string, issue int) error {
 		return r.Notifier.NotifyFailed(ctx, owner, repo, issue, message)
 	})
 
@@ -494,6 +599,33 @@ func (r *CodingTaskReconciler) failTask(ctx context.Context, task *agentsv1alpha
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// modelForStep returns the model to use for a given workflow step, falling back to the default.
+func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep) string {
+	m := task.Spec.Model
+	switch step {
+	case agentsv1alpha1.AgentRunStepPlan:
+		if m.Plan != "" {
+			return m.Plan
+		}
+	case agentsv1alpha1.AgentRunStepImplement:
+		if m.Implement != "" {
+			return m.Implement
+		}
+	case agentsv1alpha1.AgentRunStepTest:
+		if m.Test != "" {
+			return m.Test
+		}
+	case agentsv1alpha1.AgentRunStepPullRequest:
+		if m.PullRequest != "" {
+			return m.PullRequest
+		}
+	}
+	if m.Default != "" {
+		return m.Default
+	}
+	return "sonnet"
 }
 
 // createAgentRun creates an AgentRun for the given step.
@@ -521,6 +653,8 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			GitCredentialsRef:  task.Spec.GitCredentialsRef,
 			ServiceAccountName: task.Spec.ServiceAccountName,
 			Context:            contextStr,
+			Model:              r.modelForStep(task, step),
+			MaxTurns:           task.Spec.Model.MaxTurns,
 		},
 	}
 
@@ -587,18 +721,47 @@ func (r *CodingTaskReconciler) workBranch(task *agentsv1alpha1.CodingTask) strin
 	return fmt.Sprintf("ai/%s", task.Name)
 }
 
-// notify sends a notification if the task originated from a GitHub issue and a Notifier is configured.
-func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.CodingTask, fn func(ctx context.Context, owner, repo string, issue int) error) {
+// notifyPlanReady posts the plan as a GitHub comment and stores the comment ID for approval tracking.
+// Uses the same deduplication as notify() via the "plan-ready" key.
+func (r *CodingTaskReconciler) notifyPlanReady(ctx context.Context, task *agentsv1alpha1.CodingTask, plan string) {
 	if r.Notifier == nil {
 		return
 	}
 	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
 		return
 	}
+	if slices.Contains(task.Status.NotifiedPhases, "plan-ready") {
+		return
+	}
+	gh := task.Spec.Source.GitHub
+	commentID, err := r.Notifier.NotifyPlanReady(ctx, gh.Owner, gh.Repo, gh.IssueNumber, plan)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to post plan comment")
+		return
+	}
+	task.Status.PlanCommentID = &commentID
+	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, "plan-ready")
+}
+
+// notify sends a notification if the task originated from a GitHub issue and a Notifier is configured.
+// It deduplicates using notifyKey: if the key is already in NotifiedPhases, the notification is skipped.
+// On success the key is appended so it won't fire again on re-reconciliation.
+func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.CodingTask, notifyKey string, fn func(ctx context.Context, owner, repo string, issue int) error) {
+	if r.Notifier == nil {
+		return
+	}
+	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		return
+	}
+	if slices.Contains(task.Status.NotifiedPhases, notifyKey) {
+		return
+	}
 	gh := task.Spec.Source.GitHub
 	if err := fn(ctx, gh.Owner, gh.Repo, gh.IssueNumber); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to send notification")
+		logf.FromContext(ctx).Error(err, "failed to send notification", "key", notifyKey)
+		return // Don't mark as notified so it retries next reconcile.
 	}
+	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, notifyKey)
 }
 
 // broadcast sends a real-time event if a Broadcaster is configured.

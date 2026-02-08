@@ -95,6 +95,33 @@ spec:
                 maximum: 10
                 minimum: 0
                 type: integer
+              model:
+                description: model configures which Claude model to use for each workflow
+                  step.
+                properties:
+                  default:
+                    default: sonnet
+                    description: default is the model used when no step-specific override
+                      is set.
+                    type: string
+                  implement:
+                    description: implement overrides the model for the implementation
+                      step.
+                    type: string
+                  maxTurns:
+                    description: maxTurns limits the number of agentic turns per step.
+                    type: integer
+                  plan:
+                    description: plan overrides the model for the planning step.
+                    type: string
+                  pullRequest:
+                    description: pullRequest overrides the model for the pull request
+                      step.
+                    type: string
+                  test:
+                    description: test overrides the model for the testing step.
+                    type: string
+                type: object
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -346,11 +373,19 @@ spec:
               message:
                 description: message provides a human-readable status message.
                 type: string
+              notifiedPhases:
+                description: |-
+                  notifiedPhases tracks which notification keys have already been sent,
+                  preventing duplicate notifications on re-reconciliation.
+                items:
+                  type: string
+                type: array
               phase:
                 description: phase is the current workflow phase.
                 enum:
                 - Pending
                 - Planning
+                - AwaitingApproval
                 - Implementing
                 - Testing
                 - PullRequest
@@ -360,6 +395,12 @@ spec:
               plan:
                 description: plan is the generated implementation plan text.
                 type: string
+              planCommentID:
+                description: |-
+                  planCommentID is the GitHub comment ID where the plan was posted,
+                  used for tracking approval reactions.
+                format: int64
+                type: integer
               pullRequest:
                 description: pullRequest contains info about the created PR, if any.
                 properties:

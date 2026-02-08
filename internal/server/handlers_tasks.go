@@ -168,8 +168,34 @@ func (s *APIServer) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleApproveTask(w http.ResponseWriter, r *http.Request) {
-	// Plan approval — placeholder for future use.
-	respondError(w, http.StatusNotImplemented, "plan approval not yet implemented")
+	name := chi.URLParam(r, "name")
+
+	var task agentsv1alpha1.CodingTask
+	key := client.ObjectKey{Name: name, Namespace: s.taskNamespace}
+	if err := s.client.Get(r.Context(), key, &task); err != nil {
+		respondError(w, http.StatusNotFound, "task not found")
+		return
+	}
+
+	if task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingApproval {
+		respondError(w, http.StatusConflict, fmt.Sprintf("task is in %s phase, not AwaitingApproval", task.Status.Phase))
+		return
+	}
+
+	task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
+	task.Status.CurrentStep = 3
+	task.Status.Message = "Plan approved via API, starting implementation"
+	if err := s.client.Status().Update(r.Context(), &task); err != nil {
+		s.log.Error(err, "failed to update task status", "name", name)
+		respondError(w, http.StatusInternalServerError, "failed to approve task")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"name":    task.Name,
+		"phase":   string(task.Status.Phase),
+		"message": task.Status.Message,
+	})
 }
 
 type taskSummary struct {
