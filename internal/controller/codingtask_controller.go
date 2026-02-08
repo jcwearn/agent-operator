@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -729,10 +730,8 @@ func (r *CodingTaskReconciler) notifyPlanReady(ctx context.Context, task *agents
 	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
 		return
 	}
-	for _, k := range task.Status.NotifiedPhases {
-		if k == "plan-ready" {
-			return
-		}
+	if slices.Contains(task.Status.NotifiedPhases, "plan-ready") {
+		return
 	}
 	gh := task.Spec.Source.GitHub
 	commentID, err := r.Notifier.NotifyPlanReady(ctx, gh.Owner, gh.Repo, gh.IssueNumber, plan)
@@ -754,11 +753,8 @@ func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.
 	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
 		return
 	}
-	// Check if already notified for this key.
-	for _, k := range task.Status.NotifiedPhases {
-		if k == notifyKey {
-			return
-		}
+	if slices.Contains(task.Status.NotifiedPhases, notifyKey) {
+		return
 	}
 	gh := task.Spec.Source.GitHub
 	if err := fn(ctx, gh.Owner, gh.Repo, gh.IssueNumber); err != nil {

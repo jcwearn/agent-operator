@@ -102,7 +102,7 @@ var _ = Describe("CodingTask Controller", func() {
 			updated := &agentsv1alpha1.CodingTask{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
 			Expect(updated.Status.Phase).To(Equal(agentsv1alpha1.TaskPhasePending))
-			Expect(updated.Status.TotalSteps).To(Equal(4))
+			Expect(updated.Status.TotalSteps).To(Equal(5))
 		})
 	})
 })
