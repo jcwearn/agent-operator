@@ -56,8 +56,9 @@ spec:
             description: CodingTaskSpec defines the desired state of CodingTask.
             properties:
               agentImage:
-                default: ghcr.io/jcwearn/agent-runner:main
-                description: agentImage is the container image for agent pods.
+                description: |-
+                  agentImage is the container image for agent pods.
+                  If empty, the operator's DEFAULT_AGENT_IMAGE env var is used.
                 type: string
               anthropicApiKeyRef:
                 description: anthropicAPIKeyRef references the Secret containing the

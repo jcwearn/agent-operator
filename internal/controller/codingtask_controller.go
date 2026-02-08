@@ -62,10 +62,11 @@ type BroadcastEvent struct {
 // CodingTaskReconciler reconciles a CodingTask object.
 type CodingTaskReconciler struct {
 	client.Client
-	Scheme          *runtime.Scheme
-	Notifier        Notifier        // optional, nil-safe
-	Broadcaster     Broadcaster     // optional, nil-safe
-	ApprovalChecker ApprovalChecker // optional; if nil, plans are auto-approved
+	Scheme            *runtime.Scheme
+	Notifier          Notifier        // optional, nil-safe
+	Broadcaster       Broadcaster     // optional, nil-safe
+	ApprovalChecker   ApprovalChecker // optional; if nil, plans are auto-approved
+	DefaultAgentImage string          // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
@@ -752,6 +753,18 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 	return "sonnet"
 }
 
+// agentImage returns the agent-runner image for the given task.
+// It prefers the task-level override, then the operator default, then the CRD default.
+func (r *CodingTaskReconciler) agentImage(task *agentsv1alpha1.CodingTask) string {
+	if task.Spec.AgentImage != "" {
+		return task.Spec.AgentImage
+	}
+	if r.DefaultAgentImage != "" {
+		return r.DefaultAgentImage
+	}
+	return "ghcr.io/jcwearn/agent-runner:main"
+}
+
 // createAgentRun creates an AgentRun for the given step.
 func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep, prompt, contextStr string) (*agentsv1alpha1.AgentRun, error) {
 	runName := fmt.Sprintf("%s-%s-%d", task.Name, step, time.Now().Unix())
@@ -769,7 +782,7 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			TaskRef:            task.Name,
 			Step:               step,
 			Prompt:             prompt,
-			Image:              task.Spec.AgentImage,
+			Image:              r.agentImage(task),
 			Timeout:            task.Spec.StepTimeout,
 			Repository:         task.Spec.Repository,
 			Resources:          task.Spec.Resources,
