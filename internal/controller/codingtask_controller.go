@@ -122,6 +122,17 @@ func (r *CodingTaskReconciler) handlePending(ctx context.Context, task *agentsv1
 	log := logf.FromContext(ctx)
 	log.Info("transitioning task to Planning phase")
 
+	// Guard: if a plan run is already active (status not yet visible via label query), skip creation.
+	if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepPlan) {
+		log.Info("plan run already active, skipping duplicate creation")
+		task.Status.Phase = agentsv1alpha1.TaskPhasePlanning
+		task.Status.Message = "Planning agent already running"
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	now := metav1.Now()
 	task.Status.Phase = agentsv1alpha1.TaskPhasePlanning
 	task.Status.CurrentStep = 1
@@ -215,6 +226,19 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 
 	// Need a plan comment ID to check approval.
 	if task.Status.PlanCommentID == nil {
+		// If we have a notifier and this is a GitHub issue, try to (re-)post the plan comment.
+		// This handles the case where notifyPlanReady succeeded but the status update conflicted,
+		// losing the PlanCommentID.
+		if r.Notifier != nil && task.Spec.Source.Type == agentsv1alpha1.TaskSourceGitHubIssue && task.Spec.Source.GitHub != nil {
+			log.Info("plan comment ID missing, attempting to post plan comment")
+			r.notifyPlanReady(ctx, task, task.Status.Plan)
+			if task.Status.PlanCommentID != nil {
+				if err := r.Status().Update(ctx, task); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
 		log.Info("no plan comment ID, auto-approving")
 		task.Status.RunTests = false
 		task.Status.TotalSteps = 4
@@ -246,6 +270,12 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 	}
 
 	if feedback != "" {
+		// Guard: if a plan run is already active (e.g., from a previous re-plan attempt), don't create another.
+		if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepPlan) {
+			log.Info("plan run already active, skipping duplicate re-plan creation")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
 		// Feedback received — re-plan with the feedback incorporated.
 		log.Info("feedback received, re-planning", "feedback", feedback)
 		task.Status.Phase = agentsv1alpha1.TaskPhasePlanning
@@ -295,6 +325,20 @@ Output ONLY the revised plan — no code implementation.`, task.Spec.Prompt, tas
 
 // transitionToImplementing moves a task from AwaitingApproval to Implementing.
 func (r *CodingTaskReconciler) transitionToImplementing(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Guard: if an implement run already exists, just ensure phase/step are correct and requeue.
+	if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepImplement) {
+		log.Info("implement run already active, skipping duplicate creation")
+		task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
+		task.Status.CurrentStep = 3
+		task.Status.Message = "Implementation agent already running"
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
 	task.Status.CurrentStep = 3
 	task.Status.RetryCount = 0
@@ -335,11 +379,18 @@ Output a summary of what you implemented and any notes for the tester.`, task.Sp
 
 // handleImplementing checks if the implementation AgentRun has completed.
 func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
 	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if run == nil {
+		// Guard: if an implement run is already tracked in status, the label query just hasn't caught up.
+		if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepImplement) {
+			log.Info("implement run active in status but not yet visible via label query, requeuing")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		// No implement run exists yet — create one (e.g., after API-based approval).
 		return r.transitionToImplementing(ctx, task)
 	}
@@ -368,6 +419,15 @@ func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *age
 		r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Starting tests")
 		})
+
+		// Guard: if a test run is already active, skip creation.
+		if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepTest) {
+			log.Info("test run already active, skipping duplicate creation")
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
 
 		prompt := fmt.Sprintf(`You are a testing agent. Run the test suite for the repository and verify the changes are correct.
 
@@ -414,6 +474,8 @@ Output the test results.`, task.Spec.Prompt, run.Status.Output, r.workBranch(tas
 
 // handleTesting checks if the test AgentRun completed. On failure, retries implementation.
 func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
 	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepTest)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -439,6 +501,12 @@ func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1
 	case agentsv1alpha1.AgentRunPhaseFailed:
 		// Test failure: retry the implement step with error context.
 		if task.Status.RetryCount < task.Spec.MaxRetries {
+			// Guard: if an implement run is already active from a previous retry, don't create another.
+			if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepImplement) {
+				log.Info("implement run already active, skipping duplicate retry creation")
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+
 			task.Status.RetryCount++
 			task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
 			task.Status.CurrentStep = 3
@@ -545,6 +613,17 @@ func (r *CodingTaskReconciler) handlePullRequest(ctx context.Context, task *agen
 // createPullRequestRun creates a PR AgentRun. Either implNotes or testResults (or both) may be provided
 // to give context to the PR agent.
 func (r *CodingTaskReconciler) createPullRequestRun(ctx context.Context, task *agentsv1alpha1.CodingTask, implNotes, testResults string) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Guard: if a PR run is already active, skip creation.
+	if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepPullRequest) {
+		log.Info("pull-request run already active, skipping duplicate creation")
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	contextSection := ""
 	if testResults != "" {
 		contextSection += fmt.Sprintf("\nTest Results: %s", testResults)
@@ -591,9 +670,16 @@ Output the PR URL as the first line, followed by the PR description.`,
 
 // handleStepFailure handles a failed step, retrying if under the max retry count.
 func (r *CodingTaskReconciler) handleStepFailure(ctx context.Context, task *agentsv1alpha1.CodingTask, run *agentsv1alpha1.AgentRun, step agentsv1alpha1.AgentRunStep) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 	r.updateAgentRunRef(task, run)
 
 	if task.Status.RetryCount < task.Spec.MaxRetries {
+		// Guard: if a run for this step is already active, don't create a duplicate retry.
+		if r.hasActiveRunForStep(task, step) {
+			log.Info("run already active for step, skipping duplicate retry", "step", step)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+
 		task.Status.RetryCount++
 		task.Status.Message = fmt.Sprintf("Step %s failed (attempt %d/%d), retrying", step, task.Status.RetryCount, task.Spec.MaxRetries)
 
@@ -749,6 +835,19 @@ func (r *CodingTaskReconciler) updateAgentRunRef(task *agentsv1alpha1.CodingTask
 			return
 		}
 	}
+}
+
+// hasActiveRunForStep returns true if the task's in-memory AgentRuns list already
+// contains a run for the given step that is neither Failed nor Succeeded. This is
+// used as an idempotency guard to prevent duplicate AgentRun creation when
+// getLatestAgentRun (label-indexed API query) hasn't caught up yet.
+func (r *CodingTaskReconciler) hasActiveRunForStep(task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep) bool {
+	for _, ref := range task.Status.AgentRuns {
+		if ref.Step == step && ref.Phase != agentsv1alpha1.AgentRunPhaseFailed && ref.Phase != agentsv1alpha1.AgentRunPhaseSucceeded {
+			return true
+		}
+	}
+	return false
 }
 
 // workBranch returns the work branch name for a task.
