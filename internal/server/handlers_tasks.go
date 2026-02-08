@@ -167,8 +167,19 @@ func (s *APIServer) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// approveTaskRequest is the optional JSON body for the approve endpoint.
+type approveTaskRequest struct {
+	RunTests bool `json:"runTests"`
+}
+
 func (s *APIServer) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+
+	// Parse optional body for runTests flag.
+	var req approveTaskRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		_ = json.NewDecoder(r.Body).Decode(&req) // ignore errors — defaults to false
+	}
 
 	var task agentsv1alpha1.CodingTask
 	key := client.ObjectKey{Name: name, Namespace: s.taskNamespace}
@@ -184,6 +195,12 @@ func (s *APIServer) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 
 	task.Status.Phase = agentsv1alpha1.TaskPhaseImplementing
 	task.Status.CurrentStep = 3
+	task.Status.RunTests = req.RunTests
+	if req.RunTests {
+		task.Status.TotalSteps = 5
+	} else {
+		task.Status.TotalSteps = 4
+	}
 	task.Status.Message = "Plan approved via API, starting implementation"
 	if err := s.client.Status().Update(r.Context(), &task); err != nil {
 		s.log.Error(err, "failed to update task status", "name", name)
@@ -192,9 +209,10 @@ func (s *APIServer) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
-		"name":    task.Name,
-		"phase":   string(task.Status.Phase),
-		"message": task.Status.Message,
+		"name":     task.Name,
+		"phase":    string(task.Status.Phase),
+		"runTests": task.Status.RunTests,
+		"message":  task.Status.Message,
 	})
 }
 

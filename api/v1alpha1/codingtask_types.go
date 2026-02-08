@@ -270,6 +270,11 @@ type CodingTaskStatus struct {
 	// +optional
 	AgentRuns []AgentRunReference `json:"agentRuns,omitempty"`
 
+	// runTests indicates whether the testing step should run.
+	// Set during plan approval based on the checkbox in the plan comment.
+	// +optional
+	RunTests bool `json:"runTests,omitempty"`
+
 	// planCommentID is the GitHub comment ID where the plan was posted,
 	// used for tracking approval reactions.
 	// +optional

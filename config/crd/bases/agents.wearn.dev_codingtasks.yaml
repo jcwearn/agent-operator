@@ -418,6 +418,11 @@ spec:
                 description: retryCount tracks how many retries have been attempted
                   for the current step.
                 type: integer
+              runTests:
+                description: |-
+                  runTests indicates whether the testing step should run.
+                  Set during plan approval based on the checkbox in the plan comment.
+                type: boolean
               startedAt:
                 description: startedAt is when the task began processing.
                 format: date-time

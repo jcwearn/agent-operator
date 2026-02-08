@@ -42,7 +42,7 @@ type Notifier interface {
 
 // ApprovalChecker checks whether a plan has been approved via GitHub reactions or comments.
 type ApprovalChecker interface {
-	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, feedback string, err error)
+	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, runTests bool, feedback string, err error)
 }
 
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
@@ -205,31 +205,43 @@ func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv
 func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// If no ApprovalChecker is configured, auto-approve.
+	// If no ApprovalChecker is configured, auto-approve (tests skipped by default).
 	if r.ApprovalChecker == nil {
 		log.Info("no approval checker configured, auto-approving plan")
+		task.Status.RunTests = false
+		task.Status.TotalSteps = 4
 		return r.transitionToImplementing(ctx, task)
 	}
 
 	// Need a plan comment ID to check approval.
 	if task.Status.PlanCommentID == nil {
 		log.Info("no plan comment ID, auto-approving")
+		task.Status.RunTests = false
+		task.Status.TotalSteps = 4
 		return r.transitionToImplementing(ctx, task)
 	}
 
 	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		task.Status.RunTests = false
+		task.Status.TotalSteps = 4
 		return r.transitionToImplementing(ctx, task)
 	}
 
 	gh := task.Spec.Source.GitHub
-	approved, feedback, err := r.ApprovalChecker.CheckApproval(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.PlanCommentID)
+	approved, runTests, feedback, err := r.ApprovalChecker.CheckApproval(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.PlanCommentID)
 	if err != nil {
 		log.Error(err, "failed to check approval")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	if approved {
-		log.Info("plan approved via reaction")
+		log.Info("plan approved via reaction", "runTests", runTests)
+		task.Status.RunTests = runTests
+		if runTests {
+			task.Status.TotalSteps = 5
+		} else {
+			task.Status.TotalSteps = 4
+		}
 		return r.transitionToImplementing(ctx, task)
 	}
 
@@ -334,11 +346,24 @@ func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *age
 
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
-		task.Status.Phase = agentsv1alpha1.TaskPhaseTesting
-		task.Status.CurrentStep = 4
-		task.Status.RetryCount = 0
-		task.Status.Message = "Implementation complete, running tests"
 		r.updateAgentRunRef(task, run)
+		task.Status.RetryCount = 0
+
+		if !task.Status.RunTests {
+			// Skip testing — go straight to PullRequest.
+			task.Status.Phase = agentsv1alpha1.TaskPhasePullRequest
+			task.Status.CurrentStep = task.Status.TotalSteps
+			task.Status.Message = "Implementation complete, creating pull request (tests skipped)"
+			r.broadcast(task)
+			r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
+				return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Creating pull request (tests skipped)")
+			})
+			return r.createPullRequestRun(ctx, task, run.Status.Output, "")
+		}
+
+		task.Status.Phase = agentsv1alpha1.TaskPhaseTesting
+		task.Status.CurrentStep = task.Status.TotalSteps - 1
+		task.Status.Message = "Implementation complete, running tests"
 		r.broadcast(task)
 		r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Starting tests")
@@ -400,7 +425,7 @@ func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
 		task.Status.Phase = agentsv1alpha1.TaskPhasePullRequest
-		task.Status.CurrentStep = 5
+		task.Status.CurrentStep = task.Status.TotalSteps
 		task.Status.RetryCount = 0
 		task.Status.Message = "Tests passed, creating pull request"
 		r.updateAgentRunRef(task, run)
@@ -409,41 +434,7 @@ func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Testing", "Succeeded", "Creating pull request")
 		})
 
-		prompt := fmt.Sprintf(`You are a pull request agent. Create a pull request for the completed work.
-
-Original Task: %s
-
-Plan:
-%s
-
-Test Results: %s
-
-Instructions:
-1. Check out the work branch: %s
-2. Push the branch to the remote
-3. Create a pull request against the base branch (%s)
-4. Write a clear PR title and description summarizing the changes
-5. If this task originated from a GitHub issue, reference it in the PR description
-6. Output the PR URL
-
-Output the PR URL as the first line, followed by the PR description.`,
-			task.Spec.Prompt, task.Status.Plan, run.Status.Output,
-			r.workBranch(task), task.Spec.Repository.Branch)
-
-		prRun, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepPullRequest, prompt, "")
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating PR AgentRun: %w", err)
-		}
-		task.Status.AgentRuns = append(task.Status.AgentRuns, agentsv1alpha1.AgentRunReference{
-			Name:  prRun.Name,
-			Step:  agentsv1alpha1.AgentRunStepPullRequest,
-			Phase: agentsv1alpha1.AgentRunPhasePending,
-		})
-
-		if err := r.Status().Update(ctx, task); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return r.createPullRequestRun(ctx, task, "", run.Status.Output)
 
 	case agentsv1alpha1.AgentRunPhaseFailed:
 		// Test failure: retry the implement step with error context.
@@ -549,6 +540,53 @@ func (r *CodingTaskReconciler) handlePullRequest(ctx context.Context, task *agen
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
+}
+
+// createPullRequestRun creates a PR AgentRun. Either implNotes or testResults (or both) may be provided
+// to give context to the PR agent.
+func (r *CodingTaskReconciler) createPullRequestRun(ctx context.Context, task *agentsv1alpha1.CodingTask, implNotes, testResults string) (ctrl.Result, error) {
+	contextSection := ""
+	if testResults != "" {
+		contextSection += fmt.Sprintf("\nTest Results: %s", testResults)
+	}
+	if implNotes != "" {
+		contextSection += fmt.Sprintf("\nImplementation Notes: %s", implNotes)
+	}
+
+	prompt := fmt.Sprintf(`You are a pull request agent. Create a pull request for the completed work.
+
+Original Task: %s
+
+Plan:
+%s
+%s
+
+Instructions:
+1. Check out the work branch: %s
+2. Push the branch to the remote
+3. Create a pull request against the base branch (%s)
+4. Write a clear PR title and description summarizing the changes
+5. If this task originated from a GitHub issue, reference it in the PR description
+6. Output the PR URL
+
+Output the PR URL as the first line, followed by the PR description.`,
+		task.Spec.Prompt, task.Status.Plan, contextSection,
+		r.workBranch(task), task.Spec.Repository.Branch)
+
+	prRun, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepPullRequest, prompt, "")
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("creating PR AgentRun: %w", err)
+	}
+	task.Status.AgentRuns = append(task.Status.AgentRuns, agentsv1alpha1.AgentRunReference{
+		Name:  prRun.Name,
+		Step:  agentsv1alpha1.AgentRunStepPullRequest,
+		Phase: agentsv1alpha1.AgentRunPhasePending,
+	})
+
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // handleStepFailure handles a failed step, retrying if under the max retry count.
