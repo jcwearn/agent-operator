@@ -265,8 +265,9 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 			},
 			Containers: []corev1.Container{
 				{
-					Name:  "agent",
-					Image: run.Spec.Image,
+					Name:            "agent",
+					Image:           run.Spec.Image,
+					ImagePullPolicy: corev1.PullAlways,
 					Env: []corev1.EnvVar{
 						{
 							Name: "ANTHROPIC_API_KEY",
