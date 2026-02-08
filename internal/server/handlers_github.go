@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	gogithub "github.com/google/go-github/v68/github"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
 )
@@ -39,6 +41,12 @@ func (s *APIServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) 
 	case *gogithub.IssuesEvent:
 		if err := s.handleIssuesEvent(r.Context(), e); err != nil {
 			s.log.Error(err, "failed to handle issues event")
+			respondError(w, http.StatusInternalServerError, "failed to process event")
+			return
+		}
+	case *gogithub.IssueCommentEvent:
+		if err := s.handleIssueCommentEvent(r.Context(), e); err != nil {
+			s.log.Error(err, "failed to handle issue comment event")
 			respondError(w, http.StatusInternalServerError, "failed to process event")
 			return
 		}
@@ -134,5 +142,53 @@ func (s *APIServer) handleIssuesEvent(ctx context.Context, event *gogithub.Issue
 		// Non-fatal: task was already created.
 	}
 
+	return nil
+}
+
+// handleIssueCommentEvent triggers immediate reconciliation for CodingTasks in AwaitingApproval
+// when a comment is posted on the corresponding GitHub issue.
+func (s *APIServer) handleIssueCommentEvent(ctx context.Context, event *gogithub.IssueCommentEvent) error {
+	if event.GetAction() != "created" {
+		return nil
+	}
+
+	// Skip bot comments.
+	if event.GetComment().GetUser().GetType() == "Bot" {
+		return nil
+	}
+
+	repo := event.GetRepo()
+	owner := repo.GetOwner().GetLogin()
+	repoName := repo.GetName()
+	issueNumber := event.GetIssue().GetNumber()
+
+	taskName := fmt.Sprintf("gh-%s-%s-%d", owner, repoName, issueNumber)
+	if len(taskName) > 63 {
+		taskName = taskName[:63]
+	}
+	taskName = strings.TrimRight(taskName, "-.")
+
+	var task agentsv1alpha1.CodingTask
+	key := client.ObjectKey{Namespace: s.taskNamespace, Name: taskName}
+	if err := s.client.Get(ctx, key, &task); err != nil {
+		// Task doesn't exist for this issue — nothing to do.
+		return nil
+	}
+
+	if task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingApproval {
+		return nil
+	}
+
+	// Annotate the task to trigger immediate reconciliation.
+	if task.Annotations == nil {
+		task.Annotations = make(map[string]string)
+	}
+	task.Annotations["agents.wearn.dev/last-webhook-event"] = time.Now().UTC().Format(time.RFC3339)
+	if err := s.client.Update(ctx, &task); err != nil {
+		return fmt.Errorf("annotating CodingTask for reconciliation: %w", err)
+	}
+
+	s.log.Info("triggered reconciliation for issue comment",
+		"task", taskName, "owner", owner, "repo", repoName, "issue", issueNumber)
 	return nil
 }
