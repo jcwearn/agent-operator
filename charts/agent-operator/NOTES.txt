@@ -1,0 +1,39 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+The agent-operator has been deployed to namespace: {{ .Release.Namespace }}
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }} -n {{ .Release.Namespace }}
+  $ helm get all {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Next steps:
+
+1. Verify the operator is running:
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "agent-operator.name" . }}
+
+2. Check the operator logs:
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "agent-operator.name" . }}
+
+3. Verify CRDs are installed:
+   kubectl get crd codingtasks.agents.wearn.dev
+   kubectl get crd agentruns.agents.wearn.dev
+
+4. Create a CodingTask to test:
+   See examples in the chart README.md or at:
+   https://github.com/jcwearn/agent-operator/tree/main/config/samples
+
+{{- if not .Values.secrets.create }}
+
+IMPORTANT: You need to create the secrets manually:
+
+  kubectl create secret generic {{ .Values.secrets.name }} \
+    --namespace {{ .Release.Namespace }} \
+    --from-literal=anthropic-api-key=sk-ant-... \
+    --from-literal=github-token=ghp_...
+{{- end }}
+
+For more information, visit:
+  https://github.com/jcwearn/agent-operator

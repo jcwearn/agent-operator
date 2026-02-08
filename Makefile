@@ -39,6 +39,36 @@ all: build
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
+##@ Helm
+
+CHART_DIR ?= charts/agent-operator
+CHART_VERSION ?= $(VERSION)
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart
+	helm lint $(CHART_DIR)
+
+.PHONY: helm-template
+helm-template: ## Template the Helm chart for inspection
+	helm template test-release $(CHART_DIR) --namespace test-system
+
+.PHONY: helm-package
+helm-package: ## Package the Helm chart
+	mkdir -p charts/packages
+	helm package $(CHART_DIR) -d charts/packages/
+
+.PHONY: helm-test
+helm-test: ## Run Helm chart tests
+	./charts/test-chart.sh
+
+.PHONY: helm-docs
+helm-docs: ## Generate Helm documentation (requires helm-docs)
+	@if command -v helm-docs >/dev/null 2>&1; then \
+		helm-docs $(CHART_DIR); \
+	else \
+		echo "helm-docs not found. Install from: https://github.com/norwoodj/helm-docs"; \
+	fi
+
 ##@ Development
 
 .PHONY: manifests

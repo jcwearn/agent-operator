@@ -1,0 +1,17 @@
+apiVersion: v2
+name: agent-operator
+description: A Kubernetes operator that orchestrates agentic coding workflows using Claude
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/jcwearn/agent-operator
+sources:
+  - https://github.com/jcwearn/agent-operator
+maintainers:
+  - name: jcwearn
+keywords:
+  - kubernetes
+  - operator
+  - ai
+  - claude
+  - automation

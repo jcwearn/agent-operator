@@ -1,0 +1,441 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: codingtasks.agents.wearn.dev
+spec:
+  group: agents.wearn.dev
+  names:
+    kind: CodingTask
+    listKind: CodingTaskList
+    plural: codingtasks
+    singular: codingtask
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.currentStep
+      name: Step
+      type: string
+    - jsonPath: .spec.repository.url
+      name: Repo
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CodingTask is the Schema for the codingtasks API.
+          It represents a complete agentic coding workflow from prompt to pull request.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CodingTaskSpec defines the desired state of CodingTask.
+            properties:
+              agentImage:
+                description: |-
+                  agentImage is the container image for agent pods.
+                  If empty, the operator's DEFAULT_AGENT_IMAGE env var is used.
+                type: string
+              anthropicApiKeyRef:
+                description: anthropicAPIKeyRef references the Secret containing the
+                  Anthropic API key.
+                properties:
+                  key:
+                    description: key is the key within the Secret.
+                    type: string
+                  name:
+                    description: name is the name of the Secret.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              gitCredentialsRef:
+                description: |-
+                  gitCredentialsRef references the Secret containing Git credentials (e.g., GitHub token).
+                  Optional when the operator is configured with a GitHub App (tokens are minted automatically).
+                properties:
+                  key:
+                    description: key is the key within the Secret.
+                    type: string
+                  name:
+                    description: name is the name of the Secret.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              maxRetries:
+                default: 3
+                description: maxRetries is the maximum number of retries per step
+                  on failure.
+                maximum: 10
+                minimum: 0
+                type: integer
+              model:
+                description: model configures which Claude model to use for each workflow
+                  step.
+                properties:
+                  default:
+                    default: sonnet
+                    description: default is the model used when no step-specific override
+                      is set.
+                    type: string
+                  implement:
+                    description: implement overrides the model for the implementation
+                      step.
+                    type: string
+                  maxTurns:
+                    description: maxTurns limits the number of agentic turns per step.
+                    type: integer
+                  plan:
+                    description: plan overrides the model for the planning step.
+                    type: string
+                  pullRequest:
+                    description: pullRequest overrides the model for the pull request
+                      step.
+                    type: string
+                  test:
+                    description: test overrides the model for the testing step.
+                    type: string
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: nodeSelector for agent pods.
+                type: object
+              prompt:
+                description: prompt is the task description / instructions for the
+                  agent.
+                minLength: 1
+                type: string
+              repository:
+                description: repository defines the target Git repository.
+                properties:
+                  branch:
+                    default: main
+                    description: branch is the base branch to work from (e.g., "main").
+                    type: string
+                  url:
+                    description: url is the Git clone URL for the repository.
+                    type: string
+                  workBranch:
+                    description: |-
+                      workBranch is the branch the agent will create for its changes.
+                      If empty, one will be generated from the task name.
+                    type: string
+                required:
+                - url
+                type: object
+              resources:
+                description: resources defines resource limits for agent pods.
+                properties:
+                  cpu:
+                    default: "4"
+                    description: cpu is the CPU limit for agent pods (e.g., "4").
+                    type: string
+                  memory:
+                    default: 8Gi
+                    description: memory is the memory limit for agent pods (e.g.,
+                      "8Gi").
+                    type: string
+                  storage:
+                    default: 20Gi
+                    description: storage is the PVC size for the workspace (e.g.,
+                      "20Gi").
+                    type: string
+                type: object
+              serviceAccountName:
+                default: agent-runner
+                description: serviceAccountName is the K8s service account for agent
+                  pods.
+                type: string
+              source:
+                description: source defines where the task originated.
+                properties:
+                  chat:
+                    description: chat contains chat session details when type is chat.
+                    properties:
+                      sessionId:
+                        description: sessionID is the chat session identifier.
+                        type: string
+                      userId:
+                        description: userID is the user who initiated the task.
+                        type: string
+                    required:
+                    - sessionId
+                    - userId
+                    type: object
+                  github:
+                    description: github contains GitHub issue details when type is
+                      github-issue.
+                    properties:
+                      issueNumber:
+                        description: issueNumber is the GitHub issue number.
+                        type: integer
+                      owner:
+                        description: owner is the GitHub repository owner.
+                        type: string
+                      repo:
+                        description: repo is the GitHub repository name.
+                        type: string
+                    required:
+                    - issueNumber
+                    - owner
+                    - repo
+                    type: object
+                  type:
+                    description: type is the source type (github-issue or chat).
+                    enum:
+                    - github-issue
+                    - chat
+                    type: string
+                required:
+                - type
+                type: object
+              stepTimeout:
+                default: 30m
+                description: stepTimeout is the default timeout for each agent step
+                  (e.g., "30m").
+                type: string
+              tolerations:
+                description: tolerations for agent pods.
+                items:
+                  description: |-
+                    The pod this Toleration is attached to tolerates any taint that matches
+                    the triple <key,value,effect> using the matching operator <operator>.
+                  properties:
+                    effect:
+                      description: |-
+                        Effect indicates the taint effect to match. Empty means match all taint effects.
+                        When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                      type: string
+                    key:
+                      description: |-
+                        Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                        If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                      type: string
+                    operator:
+                      description: |-
+                        Operator represents a key's relationship to the value.
+                        Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                        Exists is equivalent to wildcard for value, so that a pod can
+                        tolerate all taints of a particular category.
+                        Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                      type: string
+                    tolerationSeconds:
+                      description: |-
+                        TolerationSeconds represents the period of time the toleration (which must be
+                        of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                        it is not set, which means tolerate the taint forever (do not evict). Zero and
+                        negative values will be treated as 0 (evict immediately) by the system.
+                      format: int64
+                      type: integer
+                    value:
+                      description: |-
+                        Value is the taint value the toleration matches to.
+                        If the operator is Exists, the value should be empty, otherwise just a regular string.
+                      type: string
+                  type: object
+                type: array
+            required:
+            - anthropicApiKeyRef
+            - prompt
+            - repository
+            - source
+            type: object
+          status:
+            description: CodingTaskStatus defines the observed state of CodingTask.
+            properties:
+              agentRuns:
+                description: agentRuns references all AgentRun objects created for
+                  this task.
+                items:
+                  description: AgentRunReference is a lightweight reference to an
+                    AgentRun.
+                  properties:
+                    name:
+                      description: name is the AgentRun resource name.
+                      type: string
+                    phase:
+                      description: phase is the current phase of this run.
+                      enum:
+                      - Pending
+                      - Running
+                      - Succeeded
+                      - Failed
+                      type: string
+                    step:
+                      description: step is the workflow step this run corresponds
+                        to.
+                      enum:
+                      - plan
+                      - implement
+                      - test
+                      - pull-request
+                      type: string
+                  required:
+                  - name
+                  - phase
+                  - step
+                  type: object
+                type: array
+              completedAt:
+                description: completedAt is when the task finished (success or failure).
+                format: date-time
+                type: string
+              conditions:
+                description: conditions represent the current state of the CodingTask.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentStep:
+                description: currentStep is the current step number (1-based).
+                type: integer
+              message:
+                description: message provides a human-readable status message.
+                type: string
+              notifiedPhases:
+                description: |-
+                  notifiedPhases tracks which notification keys have already been sent,
+                  preventing duplicate notifications on re-reconciliation.
+                items:
+                  type: string
+                type: array
+              phase:
+                description: phase is the current workflow phase.
+                enum:
+                - Pending
+                - Planning
+                - AwaitingApproval
+                - Implementing
+                - Testing
+                - PullRequest
+                - Complete
+                - Failed
+                type: string
+              plan:
+                description: plan is the generated implementation plan text.
+                type: string
+              planCommentID:
+                description: |-
+                  planCommentID is the GitHub comment ID where the plan was posted,
+                  used for tracking approval reactions.
+                format: int64
+                type: integer
+              pullRequest:
+                description: pullRequest contains info about the created PR, if any.
+                properties:
+                  number:
+                    description: number is the PR number.
+                    type: integer
+                  url:
+                    description: url is the web URL of the pull request.
+                    type: string
+                required:
+                - number
+                - url
+                type: object
+              retryCount:
+                description: retryCount tracks how many retries have been attempted
+                  for the current step.
+                type: integer
+              runTests:
+                description: |-
+                  runTests indicates whether the testing step should run.
+                  Set during plan approval based on the checkbox in the plan comment.
+                type: boolean
+              startedAt:
+                description: startedAt is when the task began processing.
+                format: date-time
+                type: string
+              totalSteps:
+                description: totalSteps is the total number of steps in the workflow.
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

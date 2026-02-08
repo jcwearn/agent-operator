@@ -68,16 +68,39 @@ If any step fails beyond the retry limit, the task moves to `Failed` with a mess
 - A GitHub token with repo access (stored as a Kubernetes Secret)
 - Container images pushed to a registry accessible from the cluster
 
-## Quick Start
+## Installation
 
-### 1. Install CRDs
+### Option 1: Helm Chart (Recommended)
+
+The easiest way to install agent-operator is using Helm:
+
+```bash
+# Create namespace
+kubectl create namespace agent-system
+
+# Create secrets
+kubectl create secret generic agent-secrets \
+  --namespace agent-system \
+  --from-literal=anthropic-api-key=sk-ant-... \
+  --from-literal=github-token=ghp_...
+
+# Install the chart
+helm install agent-operator ./charts/agent-operator \
+  --namespace agent-system
+```
+
+For detailed Helm installation and configuration options, see the [Helm Chart README](charts/agent-operator/README.md).
+
+### Option 2: Manual Installation
+
+#### 1. Install CRDs
 
 ```bash
 make manifests
 kubectl apply -f config/crd/bases/
 ```
 
-### 2. Create secrets
+#### 2. Create secrets
 
 ```bash
 kubectl create namespace agent-system
@@ -88,13 +111,7 @@ kubectl create secret generic agent-secrets \
   --from-literal=github-token=ghp_...
 ```
 
-### 3. Create a ServiceAccount for agent pods
-
-```bash
-kubectl create serviceaccount agent-runner --namespace agent-system
-```
-
-### 4. Run the operator
+#### 3. Run the operator
 
 For local development (runs outside the cluster, connects via kubeconfig):
 
@@ -109,7 +126,7 @@ make docker-build docker-push IMG=ghcr.io/jcwearn/agent-operator:latest
 make deploy IMG=ghcr.io/jcwearn/agent-operator:latest
 ```
 
-### 5. Create a CodingTask
+#### 4. Create a CodingTask
 
 ```yaml
 apiVersion: agents.wearn.dev/v1alpha1
@@ -139,7 +156,7 @@ spec:
 kubectl apply -f codingtask.yaml
 ```
 
-### 6. Watch progress
+#### 5. Watch progress
 
 ```bash
 # Task-level status
