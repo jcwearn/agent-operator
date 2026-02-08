@@ -193,7 +193,9 @@ func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv
 		r.broadcast(task)
 
 		// Post the plan as a comment and store the comment ID for approval tracking.
-		r.notifyPlanReady(ctx, task, run.Status.Output)
+		if err := r.notifyPlanReady(ctx, task, run.Status.Output); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, err
@@ -232,11 +234,11 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 		// losing the PlanCommentID.
 		if r.Notifier != nil && task.Spec.Source.Type == agentsv1alpha1.TaskSourceGitHubIssue && task.Spec.Source.GitHub != nil {
 			log.Info("plan comment ID missing, attempting to post plan comment")
-			r.notifyPlanReady(ctx, task, task.Status.Plan)
+			if err := r.notifyPlanReady(ctx, task, task.Status.Plan); err != nil {
+				return ctrl.Result{}, err
+			}
 			if task.Status.PlanCommentID != nil {
-				if err := r.Status().Update(ctx, task); err != nil {
-					return ctrl.Result{}, err
-				}
+				// notifyPlanReady already persisted via Status().Update().
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 		}
@@ -349,6 +351,11 @@ func (r *CodingTaskReconciler) transitionToImplementing(ctx context.Context, tas
 	task.Status.RetryCount = 0
 	task.Status.Message = "Plan approved, starting implementation"
 	r.broadcast(task)
+	if err := r.notify(ctx, task, "implement-starting", func(ctx context.Context, owner, repo string, issue int) error {
+		return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Running", "Plan approved, starting implementation agent")
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	prompt := fmt.Sprintf(`You are an implementation agent. Implement the following plan in the repository.
 
@@ -411,9 +418,11 @@ func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *age
 			task.Status.CurrentStep = task.Status.TotalSteps
 			task.Status.Message = "Implementation complete, creating pull request (tests skipped)"
 			r.broadcast(task)
-			r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
+			if err := r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 				return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Creating pull request (tests skipped)")
-			})
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
 			return r.createPullRequestRun(ctx, task, run.Status.Output, "")
 		}
 
@@ -421,9 +430,16 @@ func (r *CodingTaskReconciler) handleImplementing(ctx context.Context, task *age
 		task.Status.CurrentStep = task.Status.TotalSteps - 1
 		task.Status.Message = "Implementation complete, running tests"
 		r.broadcast(task)
-		r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
+		if err := r.notify(ctx, task, "implement-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Implementation", "Succeeded", "Starting tests")
-		})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.notify(ctx, task, "testing-starting", func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Testing", "Running", "Starting test agent")
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		// Guard: if a test run is already active, skip creation.
 		if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepTest) {
@@ -497,9 +513,11 @@ func (r *CodingTaskReconciler) handleTesting(ctx context.Context, task *agentsv1
 		task.Status.Message = "Tests passed, creating pull request"
 		r.updateAgentRunRef(task, run)
 		r.broadcast(task)
-		r.notify(ctx, task, "test-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
+		if err := r.notify(ctx, task, "test-succeeded", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Testing", "Succeeded", "Creating pull request")
-		})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		return r.createPullRequestRun(ctx, task, "", run.Status.Output)
 
@@ -593,9 +611,11 @@ func (r *CodingTaskReconciler) handlePullRequest(ctx context.Context, task *agen
 		}
 
 		r.broadcast(task)
-		r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
+		if err := r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
 			return r.Notifier.NotifyComplete(ctx, owner, repo, issue, prURL)
-		})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
 
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, err
@@ -627,6 +647,12 @@ func (r *CodingTaskReconciler) createPullRequestRun(ctx context.Context, task *a
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	if err := r.notify(ctx, task, "pr-starting", func(ctx context.Context, owner, repo string, issue int) error {
+		return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Pull Request", "Running", "Creating pull request")
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	contextSection := ""
@@ -720,9 +746,11 @@ func (r *CodingTaskReconciler) failTask(ctx context.Context, task *agentsv1alpha
 	task.Status.Message = message
 
 	r.broadcast(task)
-	r.notify(ctx, task, "failed", func(ctx context.Context, owner, repo string, issue int) error {
+	if err := r.notify(ctx, task, "failed", func(ctx context.Context, owner, repo string, issue int) error {
 		return r.Notifier.NotifyFailed(ctx, owner, repo, issue, message)
-	})
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if err := r.Status().Update(ctx, task); err != nil {
 		return ctrl.Result{}, err
@@ -877,45 +905,69 @@ func (r *CodingTaskReconciler) workBranch(task *agentsv1alpha1.CodingTask) strin
 
 // notifyPlanReady posts the plan as a GitHub comment and stores the comment ID for approval tracking.
 // Uses the same deduplication as notify() via the "plan-ready" key.
-func (r *CodingTaskReconciler) notifyPlanReady(ctx context.Context, task *agentsv1alpha1.CodingTask, plan string) {
+// The comment is posted first (we need the comment ID), then the key and PlanCommentID are persisted
+// via Status().Update(). If persist fails, in-memory changes are reverted and an error is returned.
+func (r *CodingTaskReconciler) notifyPlanReady(ctx context.Context, task *agentsv1alpha1.CodingTask, plan string) error {
 	if r.Notifier == nil {
-		return
+		return nil
 	}
 	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
-		return
+		return nil
 	}
 	if slices.Contains(task.Status.NotifiedPhases, "plan-ready") {
-		return
+		return nil
 	}
+
+	// Post comment first (need the ID).
 	gh := task.Spec.Source.GitHub
 	commentID, err := r.Notifier.NotifyPlanReady(ctx, gh.Owner, gh.Repo, gh.IssueNumber, plan)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to post plan comment")
-		return
+		return nil // non-fatal
 	}
+
+	// Persist key + comment ID.
 	task.Status.PlanCommentID = &commentID
 	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, "plan-ready")
+	if err := r.Status().Update(ctx, task); err != nil {
+		// Revert in-memory changes.
+		task.Status.PlanCommentID = nil
+		task.Status.NotifiedPhases = task.Status.NotifiedPhases[:len(task.Status.NotifiedPhases)-1]
+		return fmt.Errorf("persisting plan comment ID: %w", err)
+	}
+	return nil
 }
 
 // notify sends a notification if the task originated from a GitHub issue and a Notifier is configured.
 // It deduplicates using notifyKey: if the key is already in NotifiedPhases, the notification is skipped.
-// On success the key is appended so it won't fire again on re-reconciliation.
-func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.CodingTask, notifyKey string, fn func(ctx context.Context, owner, repo string, issue int) error) {
+// The key is persisted via Status().Update() BEFORE sending the notification to prevent duplicates
+// on optimistic-lock conflicts. If the persist fails, the in-memory change is reverted and an error
+// is returned so the reconcile requeues with fresh state.
+func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.CodingTask, notifyKey string, fn func(ctx context.Context, owner, repo string, issue int) error) error {
 	if r.Notifier == nil {
-		return
+		return nil
 	}
 	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
-		return
+		return nil
 	}
 	if slices.Contains(task.Status.NotifiedPhases, notifyKey) {
-		return
+		return nil
 	}
+
+	// Pre-append key and persist BEFORE sending.
+	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, notifyKey)
+	if err := r.Status().Update(ctx, task); err != nil {
+		// Revert in-memory change, return error to trigger requeue.
+		task.Status.NotifiedPhases = task.Status.NotifiedPhases[:len(task.Status.NotifiedPhases)-1]
+		return fmt.Errorf("persisting notification key %q: %w", notifyKey, err)
+	}
+
+	// Key persisted — safe to send (at-most-once delivery).
 	gh := task.Spec.Source.GitHub
 	if err := fn(ctx, gh.Owner, gh.Repo, gh.IssueNumber); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to send notification", "key", notifyKey)
-		return // Don't mark as notified so it retries next reconcile.
 	}
-	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, notifyKey)
+	return nil
 }
 
 // broadcast sends a real-time event if a Broadcaster is configured.
