@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -260,9 +261,18 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "CodingTask")
 		os.Exit(1)
 	}
+	podRetention := 24 * time.Hour
+	if v := os.Getenv("POD_RETENTION_PERIOD"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			podRetention = d
+		} else {
+			setupLog.Error(err, "invalid POD_RETENTION_PERIOD, using default", "value", v)
+		}
+	}
 	agentRunReconciler := &controller.AgentRunReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		PodRetentionPeriod: podRetention,
 	}
 	if ghClient != nil {
 		agentRunReconciler.GitTokenProvider = ghClient

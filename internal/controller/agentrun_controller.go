@@ -49,8 +49,9 @@ type GitTokenProvider interface {
 // AgentRunReconciler reconciles an AgentRun object.
 type AgentRunReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	GitTokenProvider GitTokenProvider // optional; if set, injects a fresh token instead of using GitCredentialsRef
+	Scheme             *runtime.Scheme
+	GitTokenProvider   GitTokenProvider // optional; if set, injects a fresh token instead of using GitCredentialsRef
+	PodRetentionPeriod time.Duration    // how long to keep succeeded pods; 0 means delete immediately
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -69,10 +70,10 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Terminal states — nothing to do.
+	// Terminal states — clean up succeeded pods after retention period.
 	if run.Status.Phase == agentsv1alpha1.AgentRunPhaseSucceeded ||
 		run.Status.Phase == agentsv1alpha1.AgentRunPhaseFailed {
-		return ctrl.Result{}, nil
+		return r.handleTerminal(ctx, &run)
 	}
 
 	// Initialize if new.
@@ -219,6 +220,44 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Info("unknown AgentRun phase", "phase", run.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+}
+
+// handleTerminal manages cleanup for terminal AgentRuns.
+// Failed runs are never auto-deleted. Succeeded runs have their pods deleted
+// after PodRetentionPeriod has elapsed since completion.
+func (r *AgentRunReconciler) handleTerminal(ctx context.Context, run *agentsv1alpha1.AgentRun) (ctrl.Result, error) {
+	// Never auto-delete pods for failed runs.
+	if run.Status.Phase == agentsv1alpha1.AgentRunPhaseFailed {
+		return ctrl.Result{}, nil
+	}
+
+	// Succeeded run — check if pod should be cleaned up.
+	pod, err := r.findPod(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pod == nil {
+		// Already cleaned up.
+		return ctrl.Result{}, nil
+	}
+
+	if run.Status.CompletedAt == nil {
+		return ctrl.Result{}, nil
+	}
+
+	elapsed := time.Since(run.Status.CompletedAt.Time)
+	if elapsed < r.PodRetentionPeriod {
+		// Not yet — requeue for when retention expires.
+		return ctrl.Result{RequeueAfter: r.PodRetentionPeriod - elapsed}, nil
+	}
+
+	// Retention expired — delete the pod.
+	log := logf.FromContext(ctx)
+	log.Info("deleting completed pod after retention period", "pod", pod.Name, "elapsed", elapsed)
+	if err := r.Delete(ctx, pod); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // createPod creates an ephemeral pod for the agent run.
