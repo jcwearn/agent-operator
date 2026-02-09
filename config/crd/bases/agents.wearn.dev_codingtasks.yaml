@@ -371,6 +371,11 @@ spec:
               currentStep:
                 description: currentStep is the current step number (1-based).
                 type: integer
+              decisions:
+                description: |-
+                  decisions contains the checked decision checkboxes from the plan approval.
+                  These are the technical/product choices the reviewer made by checking boxes.
+                type: string
               message:
                 description: message provides a human-readable status message.
                 type: string
@@ -401,6 +406,11 @@ spec:
                   planCommentID is the GitHub comment ID where the plan was posted,
                   used for tracking approval reactions.
                 format: int64
+                type: integer
+              planRevision:
+                description: |-
+                  planRevision tracks how many times the plan has been revised via feedback.
+                  Used to determine whether to post a collapsed revised plan or a fresh plan.
                 type: integer
               pullRequest:
                 description: pullRequest contains info about the created PR, if any.

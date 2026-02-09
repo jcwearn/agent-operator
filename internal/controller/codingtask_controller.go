@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,14 +36,23 @@ import (
 // Notifier posts status updates to external systems (e.g., GitHub issues).
 type Notifier interface {
 	NotifyPlanReady(ctx context.Context, owner, repo string, issue int, plan string) (int64, error)
+	NotifyRevisedPlan(ctx context.Context, owner, repo string, issue int, changesSummary, fullPlan string) (int64, error)
 	NotifyStepUpdate(ctx context.Context, owner, repo string, issue int, step, status, msg string) error
 	NotifyComplete(ctx context.Context, owner, repo string, issue int, prURL string) error
 	NotifyFailed(ctx context.Context, owner, repo string, issue int, reason string) error
 }
 
+// ApprovalResult contains the parsed result of a plan approval check.
+type ApprovalResult struct {
+	Approved  bool
+	RunTests  bool
+	Decisions string // checked checkbox lines (excluding "Run tests")
+	Feedback  string
+}
+
 // ApprovalChecker checks whether a plan has been approved via GitHub reactions or comments.
 type ApprovalChecker interface {
-	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (approved bool, runTests bool, feedback string, err error)
+	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (ApprovalResult, error)
 }
 
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
@@ -150,7 +160,11 @@ Instructions:
 3. Break the work into clear, ordered steps
 4. Consider edge cases and testing requirements
 5. Output your plan as structured markdown
-6. If there are technical or product decisions to make, list them clearly as questions so the reviewer can provide guidance before implementation begins
+6. If there are technical or product decisions to make, present each as a
+   multiple-choice group using GitHub checkboxes. Example:
+   ### Decision: Database choice
+   - [ ] PostgreSQL -- mature, ACID-compliant
+   - [ ] SQLite -- simpler, no external dependency
 
 Output ONLY the plan — no code implementation.`, task.Spec.Prompt)
 
@@ -184,7 +198,6 @@ func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv
 
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
-		task.Status.Plan = run.Status.Output
 		task.Status.Phase = agentsv1alpha1.TaskPhaseAwaitingApproval
 		task.Status.CurrentStep = 2
 		task.Status.RetryCount = 0
@@ -192,9 +205,19 @@ func (r *CodingTaskReconciler) handlePlanning(ctx context.Context, task *agentsv
 		r.updateAgentRunRef(task, run)
 		r.broadcast(task)
 
-		// Post the plan as a comment and store the comment ID for approval tracking.
-		if err := r.notifyPlanReady(ctx, task, run.Status.Output); err != nil {
-			return ctrl.Result{}, err
+		if task.Status.PlanRevision > 0 {
+			// Revised plan — parse the structured output and post a collapsed comment.
+			changesSummary, fullPlan := parseRevisedPlanOutput(run.Status.Output)
+			task.Status.Plan = fullPlan
+			if err := r.notifyRevisedPlan(ctx, task, changesSummary, fullPlan); err != nil {
+				return ctrl.Result{}, err
+			}
+		} else {
+			// First plan — post the full plan as-is.
+			task.Status.Plan = run.Status.Output
+			if err := r.notifyPlanReady(ctx, task, run.Status.Output); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 
 		if err := r.Status().Update(ctx, task); err != nil {
@@ -255,16 +278,17 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 	}
 
 	gh := task.Spec.Source.GitHub
-	approved, runTests, feedback, err := r.ApprovalChecker.CheckApproval(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.PlanCommentID)
+	result, err := r.ApprovalChecker.CheckApproval(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.PlanCommentID)
 	if err != nil {
 		log.Error(err, "failed to check approval")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	if approved {
-		log.Info("plan approved via reaction", "runTests", runTests)
-		task.Status.RunTests = runTests
-		if runTests {
+	if result.Approved {
+		log.Info("plan approved via reaction", "runTests", result.RunTests)
+		task.Status.RunTests = result.RunTests
+		task.Status.Decisions = result.Decisions
+		if result.RunTests {
 			task.Status.TotalSteps = 5
 		} else {
 			task.Status.TotalSteps = 4
@@ -272,7 +296,7 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 		return r.transitionToImplementing(ctx, task)
 	}
 
-	if feedback != "" {
+	if result.Feedback != "" {
 		// Guard: if a plan run is already active (e.g., from a previous re-plan attempt), don't create another.
 		if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepPlan) {
 			log.Info("plan run already active, skipping duplicate re-plan creation")
@@ -280,11 +304,14 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 		}
 
 		// Feedback received — re-plan with the feedback incorporated.
-		log.Info("feedback received, re-planning", "feedback", feedback)
+		log.Info("feedback received, re-planning", "feedback", result.Feedback)
+		// Store any decisions checked in the plan comment before re-planning.
+		task.Status.Decisions = result.Decisions
 		task.Status.Phase = agentsv1alpha1.TaskPhasePlanning
 		task.Status.CurrentStep = 1
 		task.Status.RetryCount = 0
 		task.Status.PlanCommentID = nil
+		task.Status.PlanRevision++
 		// Clear "plan-ready" from NotifiedPhases so the revised plan comment gets posted.
 		task.Status.NotifiedPhases = slices.DeleteFunc(task.Status.NotifiedPhases, func(s string) bool {
 			return s == "plan-ready"
@@ -292,25 +319,40 @@ func (r *CodingTaskReconciler) handleAwaitingApproval(ctx context.Context, task 
 		task.Status.Message = "Re-planning with reviewer feedback"
 		r.broadcast(task)
 
+		decisionsSection := ""
+		if task.Status.Decisions != "" {
+			decisionsSection = fmt.Sprintf("\nPrevious Decisions (respect these unless feedback overrides them):\n%s\n", task.Status.Decisions)
+		}
+
 		prompt := fmt.Sprintf(`You are a planning agent. Your previous plan received feedback from a reviewer. Revise the plan based on their feedback.
 
 Task: %s
 
 Previous Plan:
 %s
-
-Reviewer Feedback:
+%sReviewer Feedback:
 %s
 
 Instructions:
 1. Address the reviewer's feedback
 2. Revise the plan accordingly
 3. Keep the same structured markdown format
-4. If there are technical or product decisions to make, list them clearly as questions so the reviewer can provide guidance before implementation begins
+4. If there are technical or product decisions to make, present each as a
+   multiple-choice group using GitHub checkboxes. Example:
+   ### Decision: Database choice
+   - [ ] PostgreSQL -- mature, ACID-compliant
+   - [ ] SQLite -- simpler, no external dependency
 
-Output ONLY the revised plan — no code implementation.`, task.Spec.Prompt, task.Status.Plan, feedback)
+Output your response in this exact format:
 
-		run, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepPlan, prompt, feedback)
+## What Changed
+<summary of what changed from the previous plan>
+
+---PLAN---
+
+<full revised plan>`, task.Spec.Prompt, task.Status.Plan, decisionsSection, result.Feedback)
+
+		run, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepPlan, prompt, result.Feedback)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("creating re-plan AgentRun: %w", err)
 		}
@@ -357,21 +399,25 @@ func (r *CodingTaskReconciler) transitionToImplementing(ctx context.Context, tas
 		return ctrl.Result{}, err
 	}
 
+	decisionsSection := ""
+	if task.Status.Decisions != "" {
+		decisionsSection = fmt.Sprintf("\nReviewer Decisions:\n%s\n", task.Status.Decisions)
+	}
+
 	prompt := fmt.Sprintf(`You are an implementation agent. Implement the following plan in the repository.
 
 Original Task: %s
 
 Plan:
 %s
-
-Instructions:
+%sInstructions:
 1. Create a new branch: %s
 2. Implement all changes described in the plan
 3. Write tests that cover the changes
 4. Commit your changes with a descriptive commit message
 5. Do NOT open a pull request — that will be handled separately
 
-Output a summary of what you implemented and any notes for the tester.`, task.Spec.Prompt, task.Status.Plan, r.workBranch(task))
+Output a summary of what you implemented and any notes for the tester.`, task.Spec.Prompt, task.Status.Plan, decisionsSection, r.workBranch(task))
 
 	newRun, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement, prompt, task.Status.Plan)
 	if err != nil {
@@ -936,6 +982,50 @@ func (r *CodingTaskReconciler) notifyPlanReady(ctx context.Context, task *agents
 		return fmt.Errorf("persisting plan comment ID: %w", err)
 	}
 	return nil
+}
+
+// notifyRevisedPlan posts the revised plan as a collapsed GitHub comment and stores the comment ID.
+// Uses the same deduplication as notifyPlanReady via the "plan-ready" key.
+func (r *CodingTaskReconciler) notifyRevisedPlan(ctx context.Context, task *agentsv1alpha1.CodingTask, changesSummary, fullPlan string) error {
+	if r.Notifier == nil {
+		return nil
+	}
+	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		return nil
+	}
+	if slices.Contains(task.Status.NotifiedPhases, "plan-ready") {
+		return nil
+	}
+
+	gh := task.Spec.Source.GitHub
+	commentID, err := r.Notifier.NotifyRevisedPlan(ctx, gh.Owner, gh.Repo, gh.IssueNumber, changesSummary, fullPlan)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to post revised plan comment")
+		return nil // non-fatal
+	}
+
+	task.Status.PlanCommentID = &commentID
+	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, "plan-ready")
+	if err := r.Status().Update(ctx, task); err != nil {
+		task.Status.PlanCommentID = nil
+		task.Status.NotifiedPhases = task.Status.NotifiedPhases[:len(task.Status.NotifiedPhases)-1]
+		return fmt.Errorf("persisting revised plan comment ID: %w", err)
+	}
+	return nil
+}
+
+// parseRevisedPlanOutput splits a revised plan output into a changes summary and the full plan.
+// It looks for the "---PLAN---" separator. If the separator is missing, the entire output is
+// treated as the full plan with an empty changes summary.
+func parseRevisedPlanOutput(output string) (changesSummary, fullPlan string) {
+	const separator = "---PLAN---"
+	idx := strings.Index(output, separator)
+	if idx < 0 {
+		return "", strings.TrimSpace(output)
+	}
+	changesSummary = strings.TrimSpace(output[:idx])
+	fullPlan = strings.TrimSpace(output[idx+len(separator):])
+	return changesSummary, fullPlan
 }
 
 // notify sends a notification if the task originated from a GitHub issue and a Notifier is configured.
