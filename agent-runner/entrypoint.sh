@@ -44,9 +44,9 @@ fail() {
 # Downloads text files and inlines their content; saves images to disk so
 # Claude can read them via its Read tool.
 #
-# Strategy 1 (preferred): If GITHUB_OWNER/REPO/ISSUE_NUMBER are set, fetch
-#   the issue body as rendered HTML via the GitHub API. The HTML contains
-#   pre-signed, immediately downloadable attachment URLs that work without auth.
+# Strategy 1 (preferred): If GIT_TOKEN is available, use authenticated redirect
+#   resolution. Request with auth but don't follow redirects to get the
+#   pre-signed S3 URL, then download from that URL without auth.
 # Strategy 2 (fallback): Direct download with User-Agent header (works for
 #   public repos).
 process_attachments() {
@@ -67,22 +67,6 @@ process_attachments() {
     mkdir -p "$attachments_dir"
     local modified_prompt="$prompt"
 
-    # If we have GitHub issue metadata, fetch the body_html to get signed URLs.
-    local body_html=""
-    if [ -n "${GITHUB_OWNER:-}" ] && [ -n "${GITHUB_REPO:-}" ] && [ -n "${GITHUB_ISSUE_NUMBER:-}" ]; then
-        log "Fetching issue HTML for signed attachment URLs..." >&2
-        body_html=$(curl -sf \
-            -H "Authorization: Bearer $GIT_TOKEN" \
-            -H "Accept: application/vnd.github.full+json" \
-            "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${GITHUB_ISSUE_NUMBER}" \
-            2>/dev/null | jq -r '.body_html // empty') || true
-        if [ -n "$body_html" ]; then
-            log "Got issue HTML (${#body_html} bytes)" >&2
-        else
-            log "WARNING: Failed to fetch issue HTML, will try direct download" >&2
-        fi
-    fi
-
     while IFS= read -r link; do
         # Parse the link text and URL.
         local link_text url
@@ -101,25 +85,22 @@ process_attachments() {
         local http_code=""
         local downloaded=false
 
-        # Strategy 1: Find signed URL from body_html.
-        if [ -n "$body_html" ]; then
-            # Extract the asset/file path from the original URL to match in the HTML.
-            local url_path
-            url_path=$(echo "$url" | grep -oP 'user-attachments/(assets|files)/[^ "]+')
-            if [ -n "$url_path" ]; then
-                # Look for a signed URL in the HTML that contains the same path segment.
-                local signed_url
-                signed_url=$(printf '%s' "$body_html" | grep -oP 'https://[^"]+'"$url_path"'[^"]*' | head -1 || true)
-                if [ -n "$signed_url" ]; then
-                    # Decode HTML entities in the signed URL.
-                    signed_url=$(printf '%s' "$signed_url" | sed 's/&amp;/\&/g')
-                    log "Found signed URL for $link_text" >&2
-                    http_code=$(curl -fL -w '%{http_code}' \
-                        -H "User-Agent: agent-runner/1.0" \
-                        -o "$tmpfile" "$signed_url" 2>/dev/null) || true
-                    if [ -s "$tmpfile" ]; then
-                        downloaded=true
-                    fi
+        # Strategy 1: Authenticated redirect resolution (private repos).
+        # Request with auth but don't follow redirects to get the pre-signed S3 URL.
+        if [ -n "${GIT_TOKEN:-}" ]; then
+            local redirect_url
+            redirect_url=$(curl -s \
+                -H "Authorization: Bearer $GIT_TOKEN" \
+                -H "User-Agent: agent-runner/1.0" \
+                -o /dev/null -w '%{redirect_url}' \
+                "$url" 2>/dev/null) || true
+            if [ -n "$redirect_url" ]; then
+                log "Resolved redirect for $link_text" >&2
+                http_code=$(curl -fL -w '%{http_code}' \
+                    -H "User-Agent: agent-runner/1.0" \
+                    -o "$tmpfile" "$redirect_url" 2>/dev/null) || true
+                if [ -s "$tmpfile" ]; then
+                    downloaded=true
                 fi
             fi
         fi
