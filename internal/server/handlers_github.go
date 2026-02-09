@@ -56,6 +56,12 @@ func (s *APIServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) 
 			respondError(w, http.StatusInternalServerError, "failed to process event")
 			return
 		}
+	case *gogithub.PullRequestReviewEvent:
+		if err := s.handlePullRequestReviewEvent(r.Context(), e); err != nil {
+			s.log.Error(err, "failed to handle pull request review event")
+			respondError(w, http.StatusInternalServerError, "failed to process event")
+			return
+		}
 	default:
 		s.log.Info("ignoring unhandled webhook event type", "type", gogithub.WebHookType(r))
 	}
@@ -239,6 +245,44 @@ func (s *APIServer) handlePullRequestEvent(ctx context.Context, event *gogithub.
 	s.log.Info("triggered reconciliation for PR event",
 		"task", task.Name, "owner", owner, "repo", repoName, "pr", prNumber,
 		"merged", event.GetPullRequest().GetMerged())
+	return nil
+}
+
+// handlePullRequestReviewEvent triggers immediate reconciliation when a PR review is submitted.
+func (s *APIServer) handlePullRequestReviewEvent(ctx context.Context, event *gogithub.PullRequestReviewEvent) error {
+	if event.GetAction() != "submitted" {
+		return nil
+	}
+
+	// Only act on "changes_requested" reviews.
+	if event.GetReview().GetState() != "changes_requested" {
+		return nil
+	}
+
+	repo := event.GetRepo()
+	owner := repo.GetOwner().GetLogin()
+	repoName := repo.GetName()
+	prNumber := event.GetPullRequest().GetNumber()
+
+	found, task := s.findTaskByPRNumber(ctx, owner, repoName, prNumber)
+	if !found {
+		return nil
+	}
+
+	if task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingMerge {
+		return nil
+	}
+
+	if task.Annotations == nil {
+		task.Annotations = make(map[string]string)
+	}
+	task.Annotations["agents.wearn.dev/last-webhook-event"] = time.Now().UTC().Format(time.RFC3339)
+	if err := s.client.Update(ctx, task); err != nil {
+		return fmt.Errorf("annotating CodingTask for PR review reconciliation: %w", err)
+	}
+
+	s.log.Info("triggered reconciliation for PR review",
+		"task", task.Name, "owner", owner, "repo", repoName, "pr", prNumber)
 	return nil
 }
 

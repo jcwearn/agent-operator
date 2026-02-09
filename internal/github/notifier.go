@@ -129,6 +129,61 @@ func (n *Notifier) CheckForFeedback(ctx context.Context, owner, repo string, iss
 	return "", nil
 }
 
+// CheckForReviewFeedback looks for PR reviews with "changes_requested" state submitted
+// after the anchor comment. It fetches the anchor comment's timestamp, then finds
+// matching reviews and aggregates the review body with any inline comments.
+func (n *Notifier) CheckForReviewFeedback(ctx context.Context, owner, repo string, prNumber int, anchorCommentID int64) (string, error) {
+	// Fetch the anchor comment to get its creation time.
+	anchor, _, err := n.client.Issues.GetComment(ctx, owner, repo, anchorCommentID)
+	if err != nil {
+		return "", fmt.Errorf("fetching anchor comment: %w", err)
+	}
+	anchorTime := anchor.GetCreatedAt().Time
+
+	// List reviews on the PR.
+	reviews, _, err := n.client.PullRequests.ListReviews(ctx, owner, repo, prNumber,
+		&gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		return "", fmt.Errorf("listing PR reviews: %w", err)
+	}
+
+	// Find the first CHANGES_REQUESTED review submitted after the anchor.
+	var review *gogithub.PullRequestReview
+	for _, r := range reviews {
+		if r.GetState() == "CHANGES_REQUESTED" && r.GetSubmittedAt().After(anchorTime) {
+			review = r
+			break
+		}
+	}
+	if review == nil {
+		return "", nil
+	}
+
+	// Build feedback from review body + inline comments.
+	var b strings.Builder
+	if body := review.GetBody(); body != "" {
+		b.WriteString(body)
+		b.WriteString("\n\n")
+	}
+
+	// Fetch inline review comments.
+	comments, _, err := n.client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, review.GetID(),
+		&gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		// Non-fatal — return what we have from the review body.
+		if b.Len() > 0 {
+			return strings.TrimSpace(b.String()), nil
+		}
+		return "", fmt.Errorf("listing review comments: %w", err)
+	}
+
+	for _, c := range comments {
+		fmt.Fprintf(&b, "**%s:%d** — %s\n", c.GetPath(), c.GetLine(), c.GetBody())
+	}
+
+	return strings.TrimSpace(b.String()), nil
+}
+
 // CheckApproval checks if the plan comment has been approved via a thumbs-up reaction,
 // or if a human has left feedback as a reply. When approved, it also parses the
 // plan comment body to determine whether the "Run tests" checkbox was checked

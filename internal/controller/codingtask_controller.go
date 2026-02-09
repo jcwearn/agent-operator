@@ -68,6 +68,7 @@ type ApprovalResult struct {
 type ApprovalChecker interface {
 	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (ApprovalResult, error)
 	CheckForFeedback(ctx context.Context, owner, repo string, issue int, afterCommentID int64) (string, error)
+	CheckForReviewFeedback(ctx context.Context, owner, repo string, prNumber int, anchorCommentID int64) (string, error)
 }
 
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
@@ -1108,13 +1109,24 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 				return r.handleChangeRequest(ctx, task, feedback)
 			}
 
-			// Also check comments on the PR (GitHub treats PRs as issues in its API).
+			// Also check top-level comments on the PR (GitHub treats PRs as issues in its API).
 			if task.Status.PullRequest != nil && task.Status.PullRequest.Number > 0 && task.Status.PullRequest.Number != issueNumber {
 				feedback, err = r.ApprovalChecker.CheckForFeedback(ctx, owner, repo, task.Status.PullRequest.Number, *task.Status.PRCommentID)
 				if err != nil {
 					log.Error(err, "failed to check for feedback on PR")
 				} else if feedback != "" {
 					log.Info("change request feedback received on PR", "feedback", feedback)
+					return r.handleChangeRequest(ctx, task, feedback)
+				}
+			}
+
+			// Check for PR review feedback (request changes with inline comments).
+			if task.Status.PullRequest != nil && task.Status.PullRequest.Number > 0 {
+				feedback, err = r.ApprovalChecker.CheckForReviewFeedback(ctx, owner, repo, task.Status.PullRequest.Number, *task.Status.PRCommentID)
+				if err != nil {
+					log.Error(err, "failed to check for review feedback")
+				} else if feedback != "" {
+					log.Info("change request feedback received via PR review", "feedback", feedback)
 					return r.handleChangeRequest(ctx, task, feedback)
 				}
 			}
