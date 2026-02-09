@@ -290,6 +290,16 @@ type CodingTaskStatus struct {
 	// +optional
 	RunTests bool `json:"runTests,omitempty"`
 
+	// decisions contains the checked decision checkboxes from the plan approval.
+	// These are the technical/product choices the reviewer made by checking boxes.
+	// +optional
+	Decisions string `json:"decisions,omitempty"`
+
+	// planRevision tracks how many times the plan has been revised via feedback.
+	// Used to determine whether to post a collapsed revised plan or a fresh plan.
+	// +optional
+	PlanRevision int `json:"planRevision,omitempty"`
+
 	// planCommentID is the GitHub comment ID where the plan was posted,
 	// used for tracking approval reactions.
 	// +optional

@@ -30,6 +30,42 @@ import (
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
 )
 
+var _ = Describe("parseRevisedPlanOutput", func() {
+	It("should split on ---PLAN--- separator", func() {
+		input := "## What Changed\nFixed the bug\n\n---PLAN---\n\n## Step 1\nDo the thing"
+		changes, plan := parseRevisedPlanOutput(input)
+		Expect(changes).To(Equal("## What Changed\nFixed the bug"))
+		Expect(plan).To(Equal("## Step 1\nDo the thing"))
+	})
+
+	It("should return entire output as plan when separator is missing", func() {
+		input := "## Step 1\nDo the thing"
+		changes, plan := parseRevisedPlanOutput(input)
+		Expect(changes).To(BeEmpty())
+		Expect(plan).To(Equal("## Step 1\nDo the thing"))
+	})
+
+	It("should handle empty input", func() {
+		changes, plan := parseRevisedPlanOutput("")
+		Expect(changes).To(BeEmpty())
+		Expect(plan).To(BeEmpty())
+	})
+
+	It("should handle separator at start", func() {
+		input := "---PLAN---\n\nThe plan"
+		changes, plan := parseRevisedPlanOutput(input)
+		Expect(changes).To(BeEmpty())
+		Expect(plan).To(Equal("The plan"))
+	})
+
+	It("should handle separator at end", func() {
+		input := "Changes only\n\n---PLAN---"
+		changes, plan := parseRevisedPlanOutput(input)
+		Expect(changes).To(Equal("Changes only"))
+		Expect(plan).To(BeEmpty())
+	})
+})
+
 var _ = Describe("CodingTask Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-codingtask"
