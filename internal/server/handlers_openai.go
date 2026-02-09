@@ -278,7 +278,7 @@ func (s *APIServer) buildTools() []sdkanthropic.ToolUnionParam {
 					"phase": map[string]any{
 						"type":        "string",
 						"description": "Filter by task phase",
-						"enum":        []string{"Pending", "Planning", "AwaitingApproval", "Implementing", "Testing", "PullRequest", "Complete", "Failed"},
+						"enum":        []string{"Pending", "Planning", "AwaitingApproval", "Implementing", "Testing", "PullRequest", "AwaitingMerge", "Complete", "Failed"},
 					},
 				},
 			},

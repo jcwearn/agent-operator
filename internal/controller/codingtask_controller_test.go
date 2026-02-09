@@ -66,6 +66,32 @@ var _ = Describe("parseRevisedPlanOutput", func() {
 	})
 })
 
+var _ = Describe("parsePRNumber", func() {
+	It("should extract PR number from standard GitHub URL", func() {
+		Expect(parsePRNumber("https://github.com/owner/repo/pull/42")).To(Equal(42))
+	})
+
+	It("should extract PR number from URL with trailing newline", func() {
+		Expect(parsePRNumber("https://github.com/owner/repo/pull/123\n")).To(Equal(123))
+	})
+
+	It("should extract PR number from URL with trailing text", func() {
+		Expect(parsePRNumber("https://github.com/owner/repo/pull/99\nSome description")).To(Equal(99))
+	})
+
+	It("should return 0 for URL without /pull/", func() {
+		Expect(parsePRNumber("https://github.com/owner/repo/issues/42")).To(Equal(0))
+	})
+
+	It("should return 0 for empty string", func() {
+		Expect(parsePRNumber("")).To(Equal(0))
+	})
+
+	It("should handle URL with query parameters", func() {
+		Expect(parsePRNumber("https://github.com/owner/repo/pull/7?diff=split")).To(Equal(7))
+	})
+})
+
 var _ = Describe("CodingTask Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-codingtask"

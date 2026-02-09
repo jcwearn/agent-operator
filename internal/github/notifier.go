@@ -78,6 +78,57 @@ func (n *Notifier) NotifyFailed(ctx context.Context, owner, repo string, issue i
 	return n.postComment(ctx, owner, repo, issue, body)
 }
 
+// NotifyAwaitingMerge posts a comment indicating the PR is ready and awaiting merge.
+// Returns the comment ID for change-request feedback detection.
+func (n *Notifier) NotifyAwaitingMerge(ctx context.Context, owner, repo string, issue int, prURL string) (int64, error) {
+	body := fmt.Sprintf("## Awaiting Merge\n\nPull request created: %s\n\nI'll close this issue automatically when the PR is merged.\n\n**To request changes**, reply to this issue with your feedback and I'll update the PR.", prURL)
+	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+	if err != nil {
+		return 0, err
+	}
+	return comment.GetID(), nil
+}
+
+// CloseIssue closes a GitHub issue.
+func (n *Notifier) CloseIssue(ctx context.Context, owner, repo string, issue int) error {
+	state := "closed"
+	_, _, err := n.client.Issues.Edit(ctx, owner, repo, issue,
+		&gogithub.IssueRequest{State: &state})
+	return err
+}
+
+// CheckPRStatus checks whether a pull request has been merged or closed.
+func (n *Notifier) CheckPRStatus(ctx context.Context, owner, repo string, prNumber int) (controller.PRStatus, error) {
+	pr, _, err := n.client.PullRequests.Get(ctx, owner, repo, prNumber)
+	if err != nil {
+		return controller.PRStatus{}, fmt.Errorf("getting PR %d: %w", prNumber, err)
+	}
+	return controller.PRStatus{
+		Merged: pr.GetMerged(),
+		Closed: pr.GetState() == "closed",
+	}, nil
+}
+
+// CheckForFeedback looks for non-bot comments posted after the given anchor comment ID.
+// Returns the body of the first such comment, or empty string if none found.
+func (n *Notifier) CheckForFeedback(ctx context.Context, owner, repo string, issue int, afterCommentID int64) (string, error) {
+	comments, _, err := n.client.Issues.ListComments(ctx, owner, repo, issue,
+		&gogithub.IssueListCommentsOptions{
+			ListOptions: gogithub.ListOptions{PerPage: 100},
+		})
+	if err != nil {
+		return "", fmt.Errorf("listing comments: %w", err)
+	}
+
+	for _, c := range comments {
+		if c.GetID() > afterCommentID && c.GetUser() != nil && c.GetUser().GetType() != "Bot" {
+			return c.GetBody(), nil
+		}
+	}
+	return "", nil
+}
+
 // CheckApproval checks if the plan comment has been approved via a thumbs-up reaction,
 // or if a human has left feedback as a reply. When approved, it also parses the
 // plan comment body to determine whether the "Run tests" checkbox was checked

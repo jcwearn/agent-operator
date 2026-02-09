@@ -50,6 +50,12 @@ func (s *APIServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) 
 			respondError(w, http.StatusInternalServerError, "failed to process event")
 			return
 		}
+	case *gogithub.PullRequestEvent:
+		if err := s.handlePullRequestEvent(r.Context(), e); err != nil {
+			s.log.Error(err, "failed to handle pull request event")
+			respondError(w, http.StatusInternalServerError, "failed to process event")
+			return
+		}
 	default:
 		s.log.Info("ignoring unhandled webhook event type", "type", gogithub.WebHookType(r))
 	}
@@ -146,7 +152,7 @@ func (s *APIServer) handleIssuesEvent(ctx context.Context, event *gogithub.Issue
 }
 
 // handleIssueCommentEvent triggers immediate reconciliation for CodingTasks in AwaitingApproval
-// when a comment is posted on the corresponding GitHub issue.
+// or AwaitingMerge when a comment is posted on the corresponding GitHub issue or PR.
 func (s *APIServer) handleIssueCommentEvent(ctx context.Context, event *gogithub.IssueCommentEvent) error {
 	if event.GetAction() != "created" {
 		return nil
@@ -162,6 +168,7 @@ func (s *APIServer) handleIssueCommentEvent(ctx context.Context, event *gogithub
 	repoName := repo.GetName()
 	issueNumber := event.GetIssue().GetNumber()
 
+	// Try direct issue-number lookup first.
 	taskName := fmt.Sprintf("gh-%s-%s-%d", owner, repoName, issueNumber)
 	if len(taskName) > 63 {
 		taskName = taskName[:63]
@@ -170,12 +177,19 @@ func (s *APIServer) handleIssueCommentEvent(ctx context.Context, event *gogithub
 
 	var task agentsv1alpha1.CodingTask
 	key := client.ObjectKey{Namespace: s.taskNamespace, Name: taskName}
-	if err := s.client.Get(ctx, key, &task); err != nil {
-		// Task doesn't exist for this issue — nothing to do.
-		return nil
+	err := s.client.Get(ctx, key, &task)
+	if err != nil {
+		// Direct lookup failed — try PR-number fallback.
+		// GitHub sends PR comments as IssueCommentEvent with issue number = PR number.
+		found, foundTask := s.findTaskByPRNumber(ctx, owner, repoName, issueNumber)
+		if !found {
+			return nil
+		}
+		task = *foundTask
 	}
 
-	if task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingApproval {
+	if task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingApproval &&
+		task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingMerge {
 		return nil
 	}
 
@@ -189,6 +203,64 @@ func (s *APIServer) handleIssueCommentEvent(ctx context.Context, event *gogithub
 	}
 
 	s.log.Info("triggered reconciliation for issue comment",
-		"task", taskName, "owner", owner, "repo", repoName, "issue", issueNumber)
+		"task", task.Name, "owner", owner, "repo", repoName, "issue", issueNumber)
 	return nil
+}
+
+// handlePullRequestEvent handles PR closed/merged events to trigger immediate reconciliation.
+func (s *APIServer) handlePullRequestEvent(ctx context.Context, event *gogithub.PullRequestEvent) error {
+	if event.GetAction() != "closed" {
+		return nil
+	}
+
+	repo := event.GetRepo()
+	owner := repo.GetOwner().GetLogin()
+	repoName := repo.GetName()
+	prNumber := event.GetPullRequest().GetNumber()
+
+	found, task := s.findTaskByPRNumber(ctx, owner, repoName, prNumber)
+	if !found {
+		return nil
+	}
+
+	if task.Status.Phase != agentsv1alpha1.TaskPhaseAwaitingMerge {
+		return nil
+	}
+
+	// Annotate the task to trigger immediate reconciliation.
+	if task.Annotations == nil {
+		task.Annotations = make(map[string]string)
+	}
+	task.Annotations["agents.wearn.dev/last-webhook-event"] = time.Now().UTC().Format(time.RFC3339)
+	if err := s.client.Update(ctx, task); err != nil {
+		return fmt.Errorf("annotating CodingTask for PR event reconciliation: %w", err)
+	}
+
+	s.log.Info("triggered reconciliation for PR event",
+		"task", task.Name, "owner", owner, "repo", repoName, "pr", prNumber,
+		"merged", event.GetPullRequest().GetMerged())
+	return nil
+}
+
+// findTaskByPRNumber scans CodingTasks to find one matching the given PR number.
+func (s *APIServer) findTaskByPRNumber(ctx context.Context, owner, repo string, prNumber int) (bool, *agentsv1alpha1.CodingTask) {
+	var taskList agentsv1alpha1.CodingTaskList
+	if err := s.client.List(ctx, &taskList, client.InNamespace(s.taskNamespace)); err != nil {
+		s.log.Error(err, "failed to list tasks for PR-number lookup")
+		return false, nil
+	}
+
+	for i := range taskList.Items {
+		t := &taskList.Items[i]
+		if t.Status.PullRequest != nil && t.Status.PullRequest.Number == prNumber {
+			// Verify owner/repo match via source or tracking issue.
+			if t.Spec.Source.GitHub != nil && t.Spec.Source.GitHub.Owner == owner && t.Spec.Source.GitHub.Repo == repo {
+				return true, t
+			}
+			if t.Status.TrackingIssue != nil && t.Status.TrackingIssue.Owner == owner && t.Status.TrackingIssue.Repo == repo {
+				return true, t
+			}
+		}
+	}
+	return false, nil
 }
