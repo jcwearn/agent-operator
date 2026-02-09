@@ -330,6 +330,9 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 						{Name: "AGENT_MAX_TURNS", Value: intPtrToString(run.Spec.MaxTurns)},
 						{Name: "AGENT_OUTPUT_DIR", Value: outputMountPath},
 						{Name: "AGENT_WORKSPACE_DIR", Value: workspaceMountPath},
+						{Name: "GITHUB_OWNER", Value: githubOwner(run)},
+						{Name: "GITHUB_REPO", Value: githubRepo(run)},
+						{Name: "GITHUB_ISSUE_NUMBER", Value: githubIssueNumber(run)},
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -460,6 +463,27 @@ func intPtrToString(p *int) string {
 		return ""
 	}
 	return strconv.Itoa(*p)
+}
+
+func githubOwner(run *agentsv1alpha1.AgentRun) string {
+	if run.Spec.GitHubSource != nil {
+		return run.Spec.GitHubSource.Owner
+	}
+	return ""
+}
+
+func githubRepo(run *agentsv1alpha1.AgentRun) string {
+	if run.Spec.GitHubSource != nil {
+		return run.Spec.GitHubSource.Repo
+	}
+	return ""
+}
+
+func githubIssueNumber(run *agentsv1alpha1.AgentRun) string {
+	if run.Spec.GitHubSource != nil {
+		return strconv.Itoa(run.Spec.GitHubSource.IssueNumber)
+	}
+	return ""
 }
 
 // SetupWithManager sets up the controller with the Manager.
