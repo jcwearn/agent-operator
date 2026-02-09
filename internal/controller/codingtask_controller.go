@@ -1087,79 +1087,13 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 	log := logf.FromContext(ctx)
 
 	// 1. Check for an active implement run (from a change-request cycle).
-	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if run != nil && run.Status.Phase != agentsv1alpha1.AgentRunPhaseSucceeded && run.Status.Phase != agentsv1alpha1.AgentRunPhaseFailed {
-		// Change-request implement run is still active — wait for it.
-		r.updateAgentRunRef(task, run)
-		task.Status.Message = fmt.Sprintf("Change-request implementation agent is %s", run.Status.Phase)
-		if err := r.Status().Update(ctx, task); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-	}
-	if run != nil && run.Status.Phase == agentsv1alpha1.AgentRunPhaseSucceeded {
-		// Check if this is a change-request run (created after we entered AwaitingMerge).
-		// If PRCommentID is nil, we haven't re-posted the awaiting-merge comment yet.
-		if task.Status.PRCommentID == nil {
-			log.Info("change-request implement run succeeded, re-posting awaiting-merge comment")
-			r.updateAgentRunRef(task, run)
-			// Clear the notification key so we can re-post.
-			task.Status.NotifiedPhases = slices.DeleteFunc(task.Status.NotifiedPhases, func(s string) bool {
-				return s == "awaiting-merge"
-			})
-			prURL := ""
-			if task.Status.PullRequest != nil {
-				prURL = task.Status.PullRequest.URL
-			}
-			task.Status.Message = "Changes pushed, awaiting merge"
-			if err := r.notifyAwaitingMerge(ctx, task, prURL); err != nil {
-				return ctrl.Result{}, err
-			}
-			if err := r.Status().Update(ctx, task); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
-		}
-	}
-	if run != nil && run.Status.Phase == agentsv1alpha1.AgentRunPhaseFailed {
-		// Only handle failure for runs that look like change-request runs (PRCommentID is nil
-		// because we cleared it when starting the change-request).
-		if task.Status.PRCommentID == nil {
-			return r.handleStepFailure(ctx, task, run, agentsv1alpha1.AgentRunStepImplement)
-		}
+	if result, done, err := r.checkChangeRequestRun(ctx, task); done {
+		return result, err
 	}
 
 	// 2. Check PR merge status.
-	if r.PRStatusChecker != nil && task.Status.PullRequest != nil && task.Status.PullRequest.Number > 0 {
-		owner, repo, _ := r.resolveTrackingIssue(task)
-		if owner != "" && repo != "" {
-			prStatus, err := r.PRStatusChecker.CheckPRStatus(ctx, owner, repo, task.Status.PullRequest.Number)
-			if err != nil {
-				log.Error(err, "failed to check PR status")
-			} else if prStatus.Merged {
-				log.Info("PR merged, completing task")
-				now := metav1.Now()
-				task.Status.Phase = agentsv1alpha1.TaskPhaseComplete
-				task.Status.CompletedAt = &now
-				task.Status.Message = "PR merged"
-				r.broadcast(task)
-				if err := r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
-					return r.Notifier.NotifyComplete(ctx, owner, repo, issue, task.Status.PullRequest.URL)
-				}); err != nil {
-					return ctrl.Result{}, err
-				}
-				r.closeTrackingIssue(ctx, task)
-				if err := r.Status().Update(ctx, task); err != nil {
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{}, nil
-			} else if prStatus.Closed {
-				return r.failTask(ctx, task, "PR closed without being merged")
-			}
-		}
+	if result, done, err := r.checkPRMergeStatus(ctx, task); done {
+		return result, err
 	}
 
 	// 3. Check for change-request feedback.
@@ -1178,6 +1112,108 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 
 	// 4. Nothing happened — requeue.
 	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+}
+
+// checkChangeRequestRun checks if a change-request implement run is active or completed.
+// Returns (result, true, err) if the caller should return, or (_, false, nil) to continue.
+func (r *CodingTaskReconciler) checkChangeRequestRun(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+
+	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if run == nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	switch run.Status.Phase {
+	case agentsv1alpha1.AgentRunPhaseSucceeded:
+		// If PRCommentID is nil, this is a change-request run that needs the awaiting-merge comment re-posted.
+		if task.Status.PRCommentID == nil {
+			log.Info("change-request implement run succeeded, re-posting awaiting-merge comment")
+			r.updateAgentRunRef(task, run)
+			task.Status.NotifiedPhases = slices.DeleteFunc(task.Status.NotifiedPhases, func(s string) bool {
+				return s == "awaiting-merge"
+			})
+			prURL := ""
+			if task.Status.PullRequest != nil {
+				prURL = task.Status.PullRequest.URL
+			}
+			task.Status.Message = "Changes pushed, awaiting merge"
+			if err := r.notifyAwaitingMerge(ctx, task, prURL); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			return ctrl.Result{RequeueAfter: 60 * time.Second}, true, nil
+		}
+
+	case agentsv1alpha1.AgentRunPhaseFailed:
+		// Only handle failure for change-request runs (PRCommentID is nil).
+		if task.Status.PRCommentID == nil {
+			res, err := r.handleStepFailure(ctx, task, run, agentsv1alpha1.AgentRunStepImplement)
+			return res, true, err
+		}
+
+	default:
+		// Still running — wait for it.
+		r.updateAgentRunRef(task, run)
+		task.Status.Message = fmt.Sprintf("Change-request implementation agent is %s", run.Status.Phase)
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, true, nil
+	}
+
+	return ctrl.Result{}, false, nil
+}
+
+// checkPRMergeStatus checks if the PR has been merged or closed.
+// Returns (result, true, err) if the caller should return, or (_, false, nil) to continue.
+func (r *CodingTaskReconciler) checkPRMergeStatus(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, bool, error) {
+	if r.PRStatusChecker == nil || task.Status.PullRequest == nil || task.Status.PullRequest.Number == 0 {
+		return ctrl.Result{}, false, nil
+	}
+	log := logf.FromContext(ctx)
+
+	owner, repo, _ := r.resolveTrackingIssue(task)
+	if owner == "" || repo == "" {
+		return ctrl.Result{}, false, nil
+	}
+
+	prStatus, err := r.PRStatusChecker.CheckPRStatus(ctx, owner, repo, task.Status.PullRequest.Number)
+	if err != nil {
+		log.Error(err, "failed to check PR status")
+		return ctrl.Result{}, false, nil
+	}
+
+	if prStatus.Merged {
+		log.Info("PR merged, completing task")
+		now := metav1.Now()
+		task.Status.Phase = agentsv1alpha1.TaskPhaseComplete
+		task.Status.CompletedAt = &now
+		task.Status.Message = "PR merged"
+		r.broadcast(task)
+		if err := r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyComplete(ctx, owner, repo, issue, task.Status.PullRequest.URL)
+		}); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		r.closeTrackingIssue(ctx, task)
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{}, true, nil
+	}
+
+	if prStatus.Closed {
+		res, err := r.failTask(ctx, task, "PR closed without being merged")
+		return res, true, err
+	}
+
+	return ctrl.Result{}, false, nil
 }
 
 // handleChangeRequest creates an implement AgentRun to address reviewer feedback on a PR.
