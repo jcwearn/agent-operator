@@ -64,7 +64,7 @@ process_attachments() {
     while IFS= read -r link; do
         # Parse the link text and URL.
         local link_text url
-        link_text=$(echo "$link" | sed -E 's/^!?\[([^\]]*)\]\(.*\)$/\1/')
+        link_text=$(echo "$link" | sed -E 's/^!?\[([^]]*)\]\(.*\)$/\1/')
         url=$(echo "$link" | grep -oP 'https://github\.com/user-attachments/(assets|files)/[^\)]+')
 
         if [ -z "$url" ]; then
@@ -76,11 +76,15 @@ process_attachments() {
         # Download to a temp file.
         local tmpfile
         tmpfile=$(mktemp /tmp/attachment-XXXXXX)
-        if ! curl -sfL -H "Authorization: token $GIT_TOKEN" -o "$tmpfile" "$url"; then
-            log "WARNING: Failed to download attachment: $link_text" >&2
-            rm -f "$tmpfile"
-            continue
-        fi
+        local http_code
+        http_code=$(curl -fL -w '%{http_code}' -H "Authorization: Bearer $GIT_TOKEN" -o "$tmpfile" "$url" 2>/dev/null) || {
+            # Fall back to token auth (e.g. for classic PATs).
+            http_code=$(curl -fL -w '%{http_code}' -H "Authorization: token $GIT_TOKEN" -o "$tmpfile" "$url" 2>/dev/null) || {
+                log "WARNING: Failed to download attachment: $link_text (HTTP $http_code)" >&2
+                rm -f "$tmpfile"
+                continue
+            }
+        }
 
         # Determine file type. Prefer extension from link text, fall back to
         # file(1) MIME detection.
@@ -124,14 +128,14 @@ process_attachments() {
             content=$(head -c "$max_text_bytes" "$tmpfile")
             local replacement
             replacement=$(printf '\n\n--- Attached file: %s ---\n```\n%s\n```\n--- End of %s ---\n' "$link_text" "$content" "$link_text")
-            modified_prompt="${modified_prompt//$link/$replacement}"
+            modified_prompt="${modified_prompt//"$link"/$replacement}"
             log "Inlined text attachment: $link_text (${filesize} bytes)" >&2
         elif [ "$filetype" = "image" ]; then
             local dest="${attachments_dir}/${link_text}"
             mv "$tmpfile" "$dest"
             local replacement
             replacement=$(printf '\n\n[Attached image: %s — saved to %s. Use your Read tool to view this image file.]\n' "$link_text" "$dest")
-            modified_prompt="${modified_prompt//$link/$replacement}"
+            modified_prompt="${modified_prompt//"$link"/$replacement}"
             log "Saved image attachment: $link_text -> $dest" >&2
             # Skip the rm below since we moved the file.
             continue
