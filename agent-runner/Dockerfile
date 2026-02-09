@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     gnupg \
     jq \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js (LTS) for Claude Code CLI.
