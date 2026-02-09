@@ -40,6 +40,110 @@ fail() {
     exit 1
 }
 
+# Process GitHub issue attachments embedded in the prompt.
+# Downloads text files and inlines their content; saves images to disk so
+# Claude can read them via its Read tool.
+process_attachments() {
+    local prompt="$1"
+    local attachments_dir="/agent/workspace/attachments"
+    local max_text_bytes=102400  # 100KB per file
+
+    # Extract markdown links pointing to GitHub user-attachments.
+    # Matches both [name](url) and ![name](url) patterns.
+    local links
+    links=$(echo "$prompt" | grep -oP '!?\[([^\]]*)\]\((https://github\.com/user-attachments/assets/[^\)]+)\)' || true)
+
+    if [ -z "$links" ]; then
+        echo "$prompt"
+        return 0
+    fi
+
+    mkdir -p "$attachments_dir"
+    local modified_prompt="$prompt"
+
+    while IFS= read -r link; do
+        # Parse the link text and URL.
+        local link_text url
+        link_text=$(echo "$link" | sed -E 's/^!?\[([^\]]*)\]\(.*\)$/\1/')
+        url=$(echo "$link" | grep -oP 'https://github\.com/user-attachments/assets/[^\)]+')
+
+        if [ -z "$url" ]; then
+            continue
+        fi
+
+        log "Processing attachment: $link_text ($url)" >&2
+
+        # Download to a temp file.
+        local tmpfile
+        tmpfile=$(mktemp /tmp/attachment-XXXXXX)
+        if ! curl -sfL -H "Authorization: token $GIT_TOKEN" -o "$tmpfile" "$url"; then
+            log "WARNING: Failed to download attachment: $link_text" >&2
+            rm -f "$tmpfile"
+            continue
+        fi
+
+        # Determine file type. Prefer extension from link text, fall back to
+        # file(1) MIME detection.
+        local ext mimetype filetype
+        ext="${link_text##*.}"
+        ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+        case "$ext" in
+            txt|md|yaml|yml|json|xml|csv|log|sh|bash|py|go|js|ts|html|css|toml|ini|cfg|conf|env|sql|rb|rs|java|c|h|cpp|hpp|makefile|dockerfile)
+                filetype="text"
+                ;;
+            png|jpg|jpeg|gif|webp|svg|bmp|ico|tiff|tif)
+                filetype="image"
+                ;;
+            *)
+                # Fall back to file(1) MIME detection.
+                mimetype=$(file --mime-type -b "$tmpfile" 2>/dev/null || echo "application/octet-stream")
+                case "$mimetype" in
+                    text/*)
+                        filetype="text"
+                        ;;
+                    image/*)
+                        filetype="image"
+                        ;;
+                    *)
+                        log "WARNING: Unknown file type for $link_text (mime: $mimetype), skipping" >&2
+                        rm -f "$tmpfile"
+                        continue
+                        ;;
+                esac
+                ;;
+        esac
+
+        if [ "$filetype" = "text" ]; then
+            local filesize
+            filesize=$(wc -c < "$tmpfile")
+            if [ "$filesize" -gt "$max_text_bytes" ]; then
+                log "WARNING: Text file $link_text is ${filesize} bytes (>${max_text_bytes}), truncating" >&2
+            fi
+            local content
+            content=$(head -c "$max_text_bytes" "$tmpfile")
+            local replacement
+            replacement=$(printf '\n\n--- Attached file: %s ---\n```\n%s\n```\n--- End of %s ---\n' "$link_text" "$content" "$link_text")
+            modified_prompt="${modified_prompt//$link/$replacement}"
+            log "Inlined text attachment: $link_text (${filesize} bytes)" >&2
+        elif [ "$filetype" = "image" ]; then
+            local dest="${attachments_dir}/${link_text}"
+            mv "$tmpfile" "$dest"
+            local replacement
+            replacement=$(printf '\n\n[Attached image: %s — saved to %s. Use your Read tool to view this image file.]\n' "$link_text" "$dest")
+            modified_prompt="${modified_prompt//$link/$replacement}"
+            log "Saved image attachment: $link_text -> $dest" >&2
+            # Skip the rm below since we moved the file.
+            continue
+        fi
+
+        rm -f "$tmpfile"
+    done <<< "$links"
+
+    echo "$modified_prompt"
+}
+
+
 # Validate required environment variables.
 for var in AGENT_STEP AGENT_REPO_URL AGENT_BASE_BRANCH AGENT_WORK_BRANCH AGENT_PROMPT ANTHROPIC_API_KEY GIT_TOKEN AGENT_OUTPUT_DIR AGENT_WORKSPACE_DIR; do
     if [ -z "${!var:-}" ]; then
@@ -106,6 +210,14 @@ if [ -n "${AGENT_CONTEXT:-}" ]; then
 
 Context from previous steps:
 ${AGENT_CONTEXT}"
+fi
+
+# Process any GitHub issue attachments in the prompt.
+log "Processing attachments in prompt..."
+if PROCESSED_PROMPT=$(process_attachments "$FULL_PROMPT"); then
+    FULL_PROMPT="$PROCESSED_PROMPT"
+else
+    log "WARNING: Attachment processing failed, using original prompt"
 fi
 
 # Build Claude CLI arguments.
