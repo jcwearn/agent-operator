@@ -274,11 +274,12 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 	memRequest := memLimit.DeepCopy()
 	memRequest.Set(memLimit.Value() / 2)
 
-	// Build GIT_TOKEN env var — prefer fresh installation token from GitTokenProvider,
-	// fall back to static secret ref.
-	gitTokenEnv, err := r.buildGitTokenEnv(run)
+	// Build git token env vars — prefer fresh installation token from GitTokenProvider,
+	// fall back to static secret ref. When both a GitTokenProvider and GitCredentialsRef
+	// are configured, inject the PAT as GITHUB_PAT for attachment downloads.
+	gitTokenEnvVars, err := r.buildGitTokenEnvVars(run)
 	if err != nil {
-		return nil, fmt.Errorf("building git token env: %w", err)
+		return nil, fmt.Errorf("building git token env vars: %w", err)
 	}
 
 	pod := &corev1.Pod{
@@ -307,7 +308,7 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 					Name:            "agent",
 					Image:           run.Spec.Image,
 					ImagePullPolicy: corev1.PullAlways,
-					Env: []corev1.EnvVar{
+					Env: append([]corev1.EnvVar{
 						{
 							Name: "ANTHROPIC_API_KEY",
 							ValueFrom: &corev1.EnvVarSource{
@@ -319,7 +320,7 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 								},
 							},
 						},
-						gitTokenEnv,
+					}, append(gitTokenEnvVars, []corev1.EnvVar{
 						{Name: "AGENT_STEP", Value: string(run.Spec.Step)},
 						{Name: "AGENT_REPO_URL", Value: run.Spec.Repository.URL},
 						{Name: "AGENT_BASE_BRANCH", Value: run.Spec.Repository.Branch},
@@ -330,7 +331,7 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 						{Name: "AGENT_MAX_TURNS", Value: intPtrToString(run.Spec.MaxTurns)},
 						{Name: "AGENT_OUTPUT_DIR", Value: outputMountPath},
 						{Name: "AGENT_WORKSPACE_DIR", Value: workspaceMountPath},
-					},
+					}...)...),
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    cpuRequest,
@@ -423,30 +424,49 @@ func (r *AgentRunReconciler) extractOutput(pod *corev1.Pod) string {
 	return ""
 }
 
-// buildGitTokenEnv returns the GIT_TOKEN env var. If a GitTokenProvider is configured,
-// it mints a fresh installation token (valid ~1 hour). Otherwise falls back to a static
-// secret reference from the AgentRun spec.
-func (r *AgentRunReconciler) buildGitTokenEnv(run *agentsv1alpha1.AgentRun) (corev1.EnvVar, error) {
+// buildGitTokenEnvVars returns the GIT_TOKEN env var (and optionally GITHUB_PAT).
+// If a GitTokenProvider is configured, it mints a fresh installation token (valid ~1 hour)
+// for GIT_TOKEN. When both a GitTokenProvider and GitCredentialsRef are available, the PAT
+// from GitCredentialsRef is also injected as GITHUB_PAT for attachment downloads (GitHub
+// App installation tokens lack access to user-attachments URLs on private repos).
+// If no GitTokenProvider is configured, falls back to using GitCredentialsRef for GIT_TOKEN.
+func (r *AgentRunReconciler) buildGitTokenEnvVars(run *agentsv1alpha1.AgentRun) ([]corev1.EnvVar, error) {
 	if r.GitTokenProvider != nil {
 		token, err := r.GitTokenProvider.Token()
 		if err != nil {
-			return corev1.EnvVar{}, fmt.Errorf("minting installation token: %w", err)
+			return nil, fmt.Errorf("minting installation token: %w", err)
 		}
-		return corev1.EnvVar{
-			Name:  "GIT_TOKEN",
-			Value: token,
-		}, nil
+		envVars := []corev1.EnvVar{
+			{Name: "GIT_TOKEN", Value: token},
+		}
+		// When a PAT is also available, inject it for attachment downloads.
+		if run.Spec.GitCredentialsRef.Name != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: "GITHUB_PAT",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: run.Spec.GitCredentialsRef.Name,
+						},
+						Key: run.Spec.GitCredentialsRef.Key,
+					},
+				},
+			})
+		}
+		return envVars, nil
 	}
 
 	// Fallback: use static secret ref.
-	return corev1.EnvVar{
-		Name: "GIT_TOKEN",
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: run.Spec.GitCredentialsRef.Name,
+	return []corev1.EnvVar{
+		{
+			Name: "GIT_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: run.Spec.GitCredentialsRef.Name,
+					},
+					Key: run.Spec.GitCredentialsRef.Key,
 				},
-				Key: run.Spec.GitCredentialsRef.Key,
 			},
 		},
 	}, nil

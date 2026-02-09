@@ -87,10 +87,13 @@ process_attachments() {
 
         # Strategy 1: Authenticated redirect resolution (private repos).
         # Request with auth but don't follow redirects to get the pre-signed S3 URL.
-        if [ -n "${GIT_TOKEN:-}" ]; then
+        # Prefer GITHUB_PAT (a real PAT) over GIT_TOKEN (which may be a GitHub App
+        # installation token that lacks access to user-attachments URLs).
+        local auth_token="${GITHUB_PAT:-${GIT_TOKEN:-}}"
+        if [ -n "$auth_token" ]; then
             local redirect_url
             redirect_url=$(curl -s \
-                -H "Authorization: Bearer $GIT_TOKEN" \
+                -H "Authorization: Bearer $auth_token" \
                 -H "User-Agent: agent-runner/1.0" \
                 -o /dev/null -w '%{redirect_url}' \
                 "$url" 2>/dev/null) || true
