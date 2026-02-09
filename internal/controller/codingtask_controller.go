@@ -1106,7 +1106,7 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 				log.Error(err, "failed to check for feedback on issue")
 			} else if feedback != "" {
 				log.Info("change request feedback received on issue", "feedback", feedback)
-				return r.handleChangeRequest(ctx, task, feedback)
+				return r.handleChangeRequest(ctx, task, feedback, issueNumber)
 			}
 
 			// Also check top-level comments on the PR (GitHub treats PRs as issues in its API).
@@ -1116,7 +1116,7 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 					log.Error(err, "failed to check for feedback on PR")
 				} else if feedback != "" {
 					log.Info("change request feedback received on PR", "feedback", feedback)
-					return r.handleChangeRequest(ctx, task, feedback)
+					return r.handleChangeRequest(ctx, task, feedback, task.Status.PullRequest.Number)
 				}
 			}
 
@@ -1127,7 +1127,7 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 					log.Error(err, "failed to check for review feedback")
 				} else if feedback != "" {
 					log.Info("change request feedback received via PR review", "feedback", feedback)
-					return r.handleChangeRequest(ctx, task, feedback)
+					return r.handleChangeRequest(ctx, task, feedback, task.Status.PullRequest.Number)
 				}
 			}
 		}
@@ -1240,13 +1240,28 @@ func (r *CodingTaskReconciler) checkPRMergeStatus(ctx context.Context, task *age
 }
 
 // handleChangeRequest creates an implement AgentRun to address reviewer feedback on a PR.
-func (r *CodingTaskReconciler) handleChangeRequest(ctx context.Context, task *agentsv1alpha1.CodingTask, feedback string) (ctrl.Result, error) {
+// feedbackSourceNumber is the issue/PR number where the feedback was posted; used to
+// acknowledge the feedback at the source location when it differs from the tracking issue.
+func (r *CodingTaskReconciler) handleChangeRequest(ctx context.Context, task *agentsv1alpha1.CodingTask, feedback string, feedbackSourceNumber int) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	// Guard: if an implement run is already active, don't create another.
 	if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepImplement) {
 		log.Info("implement run already active, skipping change-request creation")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Post acknowledgment where the feedback was left.
+	// Skip if source is the tracking issue — the notify() below already covers it.
+	_, _, trackingIssueNumber := r.resolveTrackingIssue(task)
+	if r.Notifier != nil && feedbackSourceNumber > 0 && feedbackSourceNumber != trackingIssueNumber {
+		owner, repo, _ := r.resolveTrackingIssue(task)
+		if owner != "" && repo != "" {
+			if err := r.Notifier.NotifyStepUpdate(ctx, owner, repo, feedbackSourceNumber,
+				"Change Request", "Running", "Starting to implement your feedback"); err != nil {
+				logf.FromContext(ctx).Error(err, "failed to post feedback acknowledgment")
+			}
+		}
 	}
 
 	// Clear PRCommentID so handleAwaitingMerge knows to re-post after the run completes.
