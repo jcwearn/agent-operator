@@ -88,6 +88,25 @@ spec:
                 - key
                 - name
                 type: object
+              gitHubSource:
+                description: |-
+                  gitHubSource contains the GitHub issue reference, used by the agent
+                  to fetch attachment signed URLs via the API.
+                properties:
+                  issueNumber:
+                    description: issueNumber is the GitHub issue number.
+                    type: integer
+                  owner:
+                    description: owner is the GitHub repository owner.
+                    type: string
+                  repo:
+                    description: repo is the GitHub repository name.
+                    type: string
+                required:
+                - issueNumber
+                - owner
+                - repo
+                type: object
               image:
                 description: |-
                   image is the container image for the agent pod.

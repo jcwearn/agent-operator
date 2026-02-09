@@ -43,6 +43,12 @@ fail() {
 # Process GitHub issue attachments embedded in the prompt.
 # Downloads text files and inlines their content; saves images to disk so
 # Claude can read them via its Read tool.
+#
+# Strategy 1 (preferred): If GITHUB_OWNER/REPO/ISSUE_NUMBER are set, fetch
+#   the issue body as rendered HTML via the GitHub API. The HTML contains
+#   pre-signed, immediately downloadable attachment URLs that work without auth.
+# Strategy 2 (fallback): Direct download with User-Agent header (works for
+#   public repos).
 process_attachments() {
     local prompt="$1"
     local attachments_dir="/agent/workspace/attachments"
@@ -61,6 +67,22 @@ process_attachments() {
     mkdir -p "$attachments_dir"
     local modified_prompt="$prompt"
 
+    # If we have GitHub issue metadata, fetch the body_html to get signed URLs.
+    local body_html=""
+    if [ -n "${GITHUB_OWNER:-}" ] && [ -n "${GITHUB_REPO:-}" ] && [ -n "${GITHUB_ISSUE_NUMBER:-}" ]; then
+        log "Fetching issue HTML for signed attachment URLs..." >&2
+        body_html=$(curl -sf \
+            -H "Authorization: Bearer $GIT_TOKEN" \
+            -H "Accept: application/vnd.github.full+json" \
+            "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${GITHUB_ISSUE_NUMBER}" \
+            2>/dev/null | jq -r '.body_html // empty') || true
+        if [ -n "$body_html" ]; then
+            log "Got issue HTML (${#body_html} bytes)" >&2
+        else
+            log "WARNING: Failed to fetch issue HTML, will try direct download" >&2
+        fi
+    fi
+
     while IFS= read -r link; do
         # Parse the link text and URL.
         local link_text url
@@ -73,21 +95,48 @@ process_attachments() {
 
         log "Processing attachment: $link_text ($url)" >&2
 
-        # Download to a temp file.
         local tmpfile
         tmpfile=$(mktemp /tmp/attachment-XXXXXX)
-        # GitHub user-attachment URLs redirect to pre-signed S3 URLs that
-        # carry auth in query parameters. No Authorization header needed;
-        # sending one can cause 404. A User-Agent header is required.
-        local http_code
-        http_code=$(curl -fL -w '%{http_code}' -H "User-Agent: agent-runner/1.0" \
-            -o "$tmpfile" "$url" 2>/dev/null) || true
 
-        if [ ! -s "$tmpfile" ]; then
+        local http_code=""
+        local downloaded=false
+
+        # Strategy 1: Find signed URL from body_html.
+        if [ -n "$body_html" ]; then
+            # Extract the asset/file path from the original URL to match in the HTML.
+            local url_path
+            url_path=$(echo "$url" | grep -oP 'user-attachments/(assets|files)/[^ "]+')
+            if [ -n "$url_path" ]; then
+                # Look for a signed URL in the HTML that contains the same path segment.
+                local signed_url
+                signed_url=$(printf '%s' "$body_html" | grep -oP 'https://[^"]+'"$url_path"'[^"]*' | head -1 || true)
+                if [ -n "$signed_url" ]; then
+                    # Decode HTML entities in the signed URL.
+                    signed_url=$(printf '%s' "$signed_url" | sed 's/&amp;/\&/g')
+                    log "Found signed URL for $link_text" >&2
+                    http_code=$(curl -fL -w '%{http_code}' \
+                        -H "User-Agent: agent-runner/1.0" \
+                        -o "$tmpfile" "$signed_url" 2>/dev/null) || true
+                    if [ -s "$tmpfile" ]; then
+                        downloaded=true
+                    fi
+                fi
+            fi
+        fi
+
+        # Strategy 2: Direct download (works for public repos).
+        if [ "$downloaded" = "false" ]; then
+            http_code=$(curl -fL -w '%{http_code}' \
+                -H "User-Agent: agent-runner/1.0" \
+                -o "$tmpfile" "$url" 2>/dev/null) || true
+            if [ -s "$tmpfile" ]; then
+                downloaded=true
+            fi
+        fi
+
+        if [ "$downloaded" = "false" ]; then
             log "WARNING: Failed to download attachment: $link_text (HTTP $http_code)" >&2
             rm -f "$tmpfile"
-            # Replace the markdown link with an informative note so the agent
-            # knows the attachment exists even though it couldn't be downloaded.
             local fail_note
             fail_note=$(printf '[Attachment: %s could not be downloaded (HTTP %s). URL: %s]' \
                 "$link_text" "$http_code" "$url")

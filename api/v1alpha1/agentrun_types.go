@@ -101,6 +101,11 @@ type AgentRunSpec struct {
 	// maxTurns limits the number of agentic turns for this run.
 	// +optional
 	MaxTurns *int `json:"maxTurns,omitempty"`
+
+	// gitHubSource contains the GitHub issue reference, used by the agent
+	// to fetch attachment signed URLs via the API.
+	// +optional
+	GitHubSource *GitHubSource `json:"gitHubSource,omitempty"`
 }
 
 // AgentRunStatus defines the observed state of AgentRun.

@@ -896,6 +896,16 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 		},
 	}
 
+	// Pass GitHub issue metadata so the agent can fetch attachment signed URLs.
+	owner, repo, issueNumber := r.resolveTrackingIssue(task)
+	if owner != "" && issueNumber > 0 {
+		run.Spec.GitHubSource = &agentsv1alpha1.GitHubSource{
+			Owner:       owner,
+			Repo:        repo,
+			IssueNumber: issueNumber,
+		}
+	}
+
 	// Set the work branch if not set.
 	if run.Spec.Repository.WorkBranch == "" {
 		run.Spec.Repository.WorkBranch = r.workBranch(task)
