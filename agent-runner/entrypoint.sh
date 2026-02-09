@@ -48,10 +48,10 @@ process_attachments() {
     local attachments_dir="/agent/workspace/attachments"
     local max_text_bytes=102400  # 100KB per file
 
-    # Extract markdown links pointing to GitHub user-attachments.
+    # Extract markdown links pointing to GitHub user-attachments (assets/ and files/ paths).
     # Matches both [name](url) and ![name](url) patterns.
     local links
-    links=$(echo "$prompt" | grep -oP '!?\[([^\]]*)\]\((https://github\.com/user-attachments/assets/[^\)]+)\)' || true)
+    links=$(echo "$prompt" | grep -oP '!?\[([^\]]*)\]\((https://github\.com/user-attachments/(assets|files)/[^\)]+)\)' || true)
 
     if [ -z "$links" ]; then
         echo "$prompt"
@@ -65,7 +65,7 @@ process_attachments() {
         # Parse the link text and URL.
         local link_text url
         link_text=$(echo "$link" | sed -E 's/^!?\[([^\]]*)\]\(.*\)$/\1/')
-        url=$(echo "$link" | grep -oP 'https://github\.com/user-attachments/assets/[^\)]+')
+        url=$(echo "$link" | grep -oP 'https://github\.com/user-attachments/(assets|files)/[^\)]+')
 
         if [ -z "$url" ]; then
             continue
