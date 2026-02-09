@@ -76,15 +76,26 @@ process_attachments() {
         # Download to a temp file.
         local tmpfile
         tmpfile=$(mktemp /tmp/attachment-XXXXXX)
+        # GitHub user-attachment URLs redirect to pre-signed S3 URLs that
+        # carry auth in query parameters. No Authorization header needed;
+        # sending one can cause 404. A User-Agent header is required.
         local http_code
-        http_code=$(curl -fL -w '%{http_code}' -H "Authorization: Bearer $GIT_TOKEN" -o "$tmpfile" "$url" 2>/dev/null) || {
-            # Fall back to token auth (e.g. for classic PATs).
-            http_code=$(curl -fL -w '%{http_code}' -H "Authorization: token $GIT_TOKEN" -o "$tmpfile" "$url" 2>/dev/null) || {
-                log "WARNING: Failed to download attachment: $link_text (HTTP $http_code)" >&2
-                rm -f "$tmpfile"
-                continue
-            }
-        }
+        http_code=$(curl -fL -w '%{http_code}' -H "User-Agent: agent-runner/1.0" \
+            -o "$tmpfile" "$url" 2>/dev/null) || true
+
+        if [ ! -s "$tmpfile" ]; then
+            log "WARNING: Failed to download attachment: $link_text (HTTP $http_code)" >&2
+            rm -f "$tmpfile"
+            # Replace the markdown link with an informative note so the agent
+            # knows the attachment exists even though it couldn't be downloaded.
+            local fail_note
+            fail_note=$(printf '[Attachment: %s could not be downloaded (HTTP %s). URL: %s]' \
+                "$link_text" "$http_code" "$url")
+            modified_prompt="${modified_prompt//"$link"/$fail_note}"
+            continue
+        fi
+
+        log "Downloaded attachment: $link_text ($http_code)" >&2
 
         # Determine file type. Prefer extension from link text, fall back to
         # file(1) MIME detection.
