@@ -141,7 +141,7 @@ func (n *Notifier) CheckApproval(ctx context.Context, owner, repo string, issue 
 // excluding the "Run tests before creating PR" checkbox which is handled separately.
 func extractCheckedDecisions(body string) string {
 	var decisions []string
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- [x] ") && !strings.Contains(trimmed, "Run tests before creating PR") {
 			decisions = append(decisions, trimmed)
