@@ -267,6 +267,7 @@ func main() {
 	if ghNotifier != nil {
 		codingTaskReconciler.Notifier = ghNotifier
 		codingTaskReconciler.ApprovalChecker = ghNotifier
+		codingTaskReconciler.PRStatusChecker = ghNotifier
 	}
 	codingTaskReconciler.Broadcaster = &hubBroadcaster{hub: apiServer.GetHub()}
 
