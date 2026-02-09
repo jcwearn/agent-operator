@@ -1096,16 +1096,27 @@ func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *ag
 		return result, err
 	}
 
-	// 3. Check for change-request feedback.
+	// 3. Check for change-request feedback on the tracking issue and on the PR itself.
 	if r.ApprovalChecker != nil && task.Status.PRCommentID != nil {
 		owner, repo, issueNumber := r.resolveTrackingIssue(task)
 		if owner != "" && repo != "" && issueNumber > 0 {
 			feedback, err := r.ApprovalChecker.CheckForFeedback(ctx, owner, repo, issueNumber, *task.Status.PRCommentID)
 			if err != nil {
-				log.Error(err, "failed to check for feedback")
+				log.Error(err, "failed to check for feedback on issue")
 			} else if feedback != "" {
-				log.Info("change request feedback received", "feedback", feedback)
+				log.Info("change request feedback received on issue", "feedback", feedback)
 				return r.handleChangeRequest(ctx, task, feedback)
+			}
+
+			// Also check comments on the PR (GitHub treats PRs as issues in its API).
+			if task.Status.PullRequest != nil && task.Status.PullRequest.Number > 0 && task.Status.PullRequest.Number != issueNumber {
+				feedback, err = r.ApprovalChecker.CheckForFeedback(ctx, owner, repo, task.Status.PullRequest.Number, *task.Status.PRCommentID)
+				if err != nil {
+					log.Error(err, "failed to check for feedback on PR")
+				} else if feedback != "" {
+					log.Info("change request feedback received on PR", "feedback", feedback)
+					return r.handleChangeRequest(ctx, task, feedback)
+				}
 			}
 		}
 	}
