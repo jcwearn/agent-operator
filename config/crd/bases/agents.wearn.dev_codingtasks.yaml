@@ -395,6 +395,7 @@ spec:
                 - Implementing
                 - Testing
                 - PullRequest
+                - AwaitingMerge
                 - Complete
                 - Failed
                 type: string
@@ -411,6 +412,12 @@ spec:
                 description: |-
                   planRevision tracks how many times the plan has been revised via feedback.
                   Used to determine whether to post a collapsed revised plan or a fresh plan.
+                type: integer
+              prCommentID:
+                description: |-
+                  prCommentID is the GitHub comment ID of the "awaiting merge" comment,
+                  used as an anchor for detecting change-request feedback.
+                format: int64
                 type: integer
               pullRequest:
                 description: pullRequest contains info about the created PR, if any.

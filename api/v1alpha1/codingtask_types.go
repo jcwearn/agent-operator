@@ -31,7 +31,7 @@ const (
 )
 
 // TaskPhase defines the current phase of a CodingTask.
-// +kubebuilder:validation:Enum=Pending;Planning;AwaitingApproval;Implementing;Testing;PullRequest;Complete;Failed
+// +kubebuilder:validation:Enum=Pending;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
 type TaskPhase string
 
 const (
@@ -41,6 +41,7 @@ const (
 	TaskPhaseImplementing     TaskPhase = "Implementing"
 	TaskPhaseTesting          TaskPhase = "Testing"
 	TaskPhasePullRequest      TaskPhase = "PullRequest"
+	TaskPhaseAwaitingMerge    TaskPhase = "AwaitingMerge"
 	TaskPhaseComplete         TaskPhase = "Complete"
 	TaskPhaseFailed           TaskPhase = "Failed"
 )
@@ -314,6 +315,11 @@ type CodingTaskStatus struct {
 	// pullRequest contains info about the created PR, if any.
 	// +optional
 	PullRequest *PullRequestInfo `json:"pullRequest,omitempty"`
+
+	// prCommentID is the GitHub comment ID of the "awaiting merge" comment,
+	// used as an anchor for detecting change-request feedback.
+	// +optional
+	PRCommentID *int64 `json:"prCommentID,omitempty"`
 
 	// startedAt is when the task began processing.
 	// +optional

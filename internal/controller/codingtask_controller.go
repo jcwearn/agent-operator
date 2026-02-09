@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,19 @@ type Notifier interface {
 	NotifyStepUpdate(ctx context.Context, owner, repo string, issue int, step, status, msg string) error
 	NotifyComplete(ctx context.Context, owner, repo string, issue int, prURL string) error
 	NotifyFailed(ctx context.Context, owner, repo string, issue int, reason string) error
+	NotifyAwaitingMerge(ctx context.Context, owner, repo string, issue int, prURL string) (int64, error)
+	CloseIssue(ctx context.Context, owner, repo string, issue int) error
+}
+
+// PRStatus contains the merge/close state of a pull request.
+type PRStatus struct {
+	Merged bool
+	Closed bool
+}
+
+// PRStatusChecker checks the merge status of a pull request.
+type PRStatusChecker interface {
+	CheckPRStatus(ctx context.Context, owner, repo string, prNumber int) (PRStatus, error)
 }
 
 // ApprovalResult contains the parsed result of a plan approval check.
@@ -53,6 +67,8 @@ type ApprovalResult struct {
 // ApprovalChecker checks whether a plan has been approved via GitHub reactions or comments.
 type ApprovalChecker interface {
 	CheckApproval(ctx context.Context, owner, repo string, issue int, commentID int64) (ApprovalResult, error)
+	CheckForFeedback(ctx context.Context, owner, repo string, issue int, afterCommentID int64) (string, error)
+	CheckForReviewFeedback(ctx context.Context, owner, repo string, prNumber int, anchorCommentID int64) (string, error)
 }
 
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
@@ -76,6 +92,7 @@ type CodingTaskReconciler struct {
 	Notifier          Notifier        // optional, nil-safe
 	Broadcaster       Broadcaster     // optional, nil-safe
 	ApprovalChecker   ApprovalChecker // optional; if nil, plans are auto-approved
+	PRStatusChecker   PRStatusChecker // optional; if nil, awaiting-merge polling is disabled
 	DefaultAgentImage string          // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
 }
 
@@ -122,6 +139,8 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.handleTesting(ctx, &task)
 	case agentsv1alpha1.TaskPhasePullRequest:
 		return r.handlePullRequest(ctx, &task)
+	case agentsv1alpha1.TaskPhaseAwaitingMerge:
+		return r.handleAwaitingMerge(ctx, &task)
 	default:
 		log.Info("unknown phase", "phase", task.Status.Phase)
 		return ctrl.Result{}, nil
@@ -149,6 +168,12 @@ func (r *CodingTaskReconciler) handlePending(ctx context.Context, task *agentsv1
 	task.Status.CurrentStep = 1
 	task.Status.StartedAt = &now
 	task.Status.Message = "Creating planning agent"
+
+	if err := r.notify(ctx, task, "planning-starting", func(ctx context.Context, owner, repo string, issue int) error {
+		return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Planning", "Running", "Starting planning agent")
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	prompt := fmt.Sprintf(`You are a planning agent. Analyze the following task and the repository codebase, then produce a detailed implementation plan.
 
@@ -641,32 +666,30 @@ func (r *CodingTaskReconciler) handlePullRequest(ctx context.Context, task *agen
 
 	switch run.Status.Phase {
 	case agentsv1alpha1.AgentRunPhaseSucceeded:
-		now := metav1.Now()
-		task.Status.Phase = agentsv1alpha1.TaskPhaseComplete
-		task.Status.CompletedAt = &now
-		task.Status.Message = "Pull request created successfully"
+		task.Status.Phase = agentsv1alpha1.TaskPhaseAwaitingMerge
+		task.Status.Message = "Pull request created, awaiting merge"
 		r.updateAgentRunRef(task, run)
 
 		// The output should contain the PR URL on the first line.
 		prURL := ""
 		if run.Status.Output != "" {
 			prURL = run.Status.Output
+			prNumber := parsePRNumber(prURL)
 			task.Status.PullRequest = &agentsv1alpha1.PullRequestInfo{
-				URL: prURL,
+				URL:    prURL,
+				Number: prNumber,
 			}
 		}
 
 		r.broadcast(task)
-		if err := r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
-			return r.Notifier.NotifyComplete(ctx, owner, repo, issue, prURL)
-		}); err != nil {
+		if err := r.notifyAwaitingMerge(ctx, task, prURL); err != nil {
 			return ctrl.Result{}, err
 		}
 
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
 
 	case agentsv1alpha1.AgentRunPhaseFailed:
 		return r.handleStepFailure(ctx, task, run, agentsv1alpha1.AgentRunStepPullRequest)
@@ -1037,7 +1060,8 @@ func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.
 	if r.Notifier == nil {
 		return nil
 	}
-	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+	owner, repo, issueNumber := r.resolveTrackingIssue(task)
+	if owner == "" || repo == "" || issueNumber == 0 {
 		return nil
 	}
 	if slices.Contains(task.Status.NotifiedPhases, notifyKey) {
@@ -1053,11 +1077,322 @@ func (r *CodingTaskReconciler) notify(ctx context.Context, task *agentsv1alpha1.
 	}
 
 	// Key persisted — safe to send (at-most-once delivery).
-	gh := task.Spec.Source.GitHub
-	if err := fn(ctx, gh.Owner, gh.Repo, gh.IssueNumber); err != nil {
+	if err := fn(ctx, owner, repo, issueNumber); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to send notification", "key", notifyKey)
 	}
 	return nil
+}
+
+// handleAwaitingMerge monitors a PR for merge, closure, or change-request feedback.
+func (r *CodingTaskReconciler) handleAwaitingMerge(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// 1. Check for an active implement run (from a change-request cycle).
+	if result, done, err := r.checkChangeRequestRun(ctx, task); done {
+		return result, err
+	}
+
+	// 2. Check PR merge status.
+	if result, done, err := r.checkPRMergeStatus(ctx, task); done {
+		return result, err
+	}
+
+	// 3. Check for change-request feedback on the tracking issue and on the PR itself.
+	if r.ApprovalChecker != nil && task.Status.PRCommentID != nil {
+		owner, repo, issueNumber := r.resolveTrackingIssue(task)
+		if owner != "" && repo != "" && issueNumber > 0 {
+			feedback, err := r.ApprovalChecker.CheckForFeedback(ctx, owner, repo, issueNumber, *task.Status.PRCommentID)
+			if err != nil {
+				log.Error(err, "failed to check for feedback on issue")
+			} else if feedback != "" {
+				log.Info("change request feedback received on issue", "feedback", feedback)
+				return r.handleChangeRequest(ctx, task, feedback, issueNumber)
+			}
+
+			// Also check top-level comments on the PR (GitHub treats PRs as issues in its API).
+			if task.Status.PullRequest != nil && task.Status.PullRequest.Number > 0 && task.Status.PullRequest.Number != issueNumber {
+				feedback, err = r.ApprovalChecker.CheckForFeedback(ctx, owner, repo, task.Status.PullRequest.Number, *task.Status.PRCommentID)
+				if err != nil {
+					log.Error(err, "failed to check for feedback on PR")
+				} else if feedback != "" {
+					log.Info("change request feedback received on PR", "feedback", feedback)
+					return r.handleChangeRequest(ctx, task, feedback, task.Status.PullRequest.Number)
+				}
+			}
+
+			// Check for PR review feedback (request changes with inline comments).
+			if task.Status.PullRequest != nil && task.Status.PullRequest.Number > 0 {
+				feedback, err = r.ApprovalChecker.CheckForReviewFeedback(ctx, owner, repo, task.Status.PullRequest.Number, *task.Status.PRCommentID)
+				if err != nil {
+					log.Error(err, "failed to check for review feedback")
+				} else if feedback != "" {
+					log.Info("change request feedback received via PR review", "feedback", feedback)
+					return r.handleChangeRequest(ctx, task, feedback, task.Status.PullRequest.Number)
+				}
+			}
+		}
+	}
+
+	// 4. Nothing happened — requeue.
+	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+}
+
+// checkChangeRequestRun checks if a change-request implement run is active or completed.
+// Returns (result, true, err) if the caller should return, or (_, false, nil) to continue.
+func (r *CodingTaskReconciler) checkChangeRequestRun(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+
+	run, err := r.getLatestAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if run == nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	switch run.Status.Phase {
+	case agentsv1alpha1.AgentRunPhaseSucceeded:
+		// If PRCommentID is nil, this is a change-request run that needs the awaiting-merge comment re-posted.
+		if task.Status.PRCommentID == nil {
+			log.Info("change-request implement run succeeded, re-posting awaiting-merge comment")
+			r.updateAgentRunRef(task, run)
+			task.Status.NotifiedPhases = slices.DeleteFunc(task.Status.NotifiedPhases, func(s string) bool {
+				return s == "awaiting-merge"
+			})
+			prURL := ""
+			if task.Status.PullRequest != nil {
+				prURL = task.Status.PullRequest.URL
+			}
+			task.Status.Message = "Changes pushed, awaiting merge"
+			if err := r.notifyAwaitingMerge(ctx, task, prURL); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			return ctrl.Result{RequeueAfter: 60 * time.Second}, true, nil
+		}
+
+	case agentsv1alpha1.AgentRunPhaseFailed:
+		// Only handle failure for change-request runs (PRCommentID is nil).
+		if task.Status.PRCommentID == nil {
+			res, err := r.handleStepFailure(ctx, task, run, agentsv1alpha1.AgentRunStepImplement)
+			return res, true, err
+		}
+
+	default:
+		// Still running — wait for it.
+		r.updateAgentRunRef(task, run)
+		task.Status.Message = fmt.Sprintf("Change-request implementation agent is %s", run.Status.Phase)
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, true, nil
+	}
+
+	return ctrl.Result{}, false, nil
+}
+
+// checkPRMergeStatus checks if the PR has been merged or closed.
+// Returns (result, true, err) if the caller should return, or (_, false, nil) to continue.
+func (r *CodingTaskReconciler) checkPRMergeStatus(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, bool, error) {
+	if r.PRStatusChecker == nil || task.Status.PullRequest == nil || task.Status.PullRequest.Number == 0 {
+		return ctrl.Result{}, false, nil
+	}
+	log := logf.FromContext(ctx)
+
+	owner, repo, _ := r.resolveTrackingIssue(task)
+	if owner == "" || repo == "" {
+		return ctrl.Result{}, false, nil
+	}
+
+	prStatus, err := r.PRStatusChecker.CheckPRStatus(ctx, owner, repo, task.Status.PullRequest.Number)
+	if err != nil {
+		log.Error(err, "failed to check PR status")
+		return ctrl.Result{}, false, nil
+	}
+
+	if prStatus.Merged {
+		log.Info("PR merged, completing task")
+		now := metav1.Now()
+		task.Status.Phase = agentsv1alpha1.TaskPhaseComplete
+		task.Status.CompletedAt = &now
+		task.Status.Message = "PR merged"
+		r.broadcast(task)
+		if err := r.notify(ctx, task, "complete", func(ctx context.Context, owner, repo string, issue int) error {
+			return r.Notifier.NotifyComplete(ctx, owner, repo, issue, task.Status.PullRequest.URL)
+		}); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		r.closeTrackingIssue(ctx, task)
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{}, true, nil
+	}
+
+	if prStatus.Closed {
+		res, err := r.failTask(ctx, task, "PR closed without being merged")
+		return res, true, err
+	}
+
+	return ctrl.Result{}, false, nil
+}
+
+// handleChangeRequest creates an implement AgentRun to address reviewer feedback on a PR.
+// feedbackSourceNumber is the issue/PR number where the feedback was posted; used to
+// acknowledge the feedback at the source location when it differs from the tracking issue.
+func (r *CodingTaskReconciler) handleChangeRequest(ctx context.Context, task *agentsv1alpha1.CodingTask, feedback string, feedbackSourceNumber int) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Guard: if an implement run is already active, don't create another.
+	if r.hasActiveRunForStep(task, agentsv1alpha1.AgentRunStepImplement) {
+		log.Info("implement run already active, skipping change-request creation")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Post acknowledgment where the feedback was left.
+	// Skip if source is the tracking issue — the notify() below already covers it.
+	_, _, trackingIssueNumber := r.resolveTrackingIssue(task)
+	if r.Notifier != nil && feedbackSourceNumber > 0 && feedbackSourceNumber != trackingIssueNumber {
+		owner, repo, _ := r.resolveTrackingIssue(task)
+		if owner != "" && repo != "" {
+			if err := r.Notifier.NotifyStepUpdate(ctx, owner, repo, feedbackSourceNumber,
+				"Change Request", "Running", "Starting to implement your feedback"); err != nil {
+				logf.FromContext(ctx).Error(err, "failed to post feedback acknowledgment")
+			}
+		}
+	}
+
+	// Clear PRCommentID so handleAwaitingMerge knows to re-post after the run completes.
+	task.Status.PRCommentID = nil
+	task.Status.RetryCount = 0
+	task.Status.Message = "Addressing reviewer feedback"
+	r.broadcast(task)
+
+	if err := r.notify(ctx, task, fmt.Sprintf("change-request-%d", time.Now().Unix()), func(ctx context.Context, owner, repo string, issue int) error {
+		return r.Notifier.NotifyStepUpdate(ctx, owner, repo, issue, "Change Request", "Running", "Addressing reviewer feedback")
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	prURL := ""
+	if task.Status.PullRequest != nil {
+		prURL = task.Status.PullRequest.URL
+	}
+
+	prompt := fmt.Sprintf(`You are an implementation agent. A reviewer has requested changes on your pull request. Address their feedback.
+
+Original Task: %s
+
+Plan:
+%s
+
+Pull Request: %s
+
+Reviewer Feedback:
+%s
+
+Instructions:
+1. Check out the work branch: %s
+2. Pull the latest changes
+3. Address the reviewer's feedback by modifying the code
+4. Commit and push your changes
+5. Do NOT create a new pull request — the existing PR will be updated automatically
+
+Output a summary of what you changed.`, task.Spec.Prompt, task.Status.Plan, prURL, feedback, r.workBranch(task))
+
+	newRun, err := r.createAgentRun(ctx, task, agentsv1alpha1.AgentRunStepImplement, prompt, feedback)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("creating change-request AgentRun: %w", err)
+	}
+	task.Status.AgentRuns = append(task.Status.AgentRuns, agentsv1alpha1.AgentRunReference{
+		Name:  newRun.Name,
+		Step:  agentsv1alpha1.AgentRunStepImplement,
+		Phase: agentsv1alpha1.AgentRunPhasePending,
+	})
+
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// parsePRNumber extracts the PR number from a GitHub PR URL.
+// Example: "https://github.com/owner/repo/pull/42" → 42
+func parsePRNumber(prURL string) int {
+	idx := strings.LastIndex(prURL, "/pull/")
+	if idx < 0 {
+		return 0
+	}
+	numStr := strings.TrimSpace(prURL[idx+len("/pull/"):])
+	// Remove anything after the number (query params, fragments, newlines).
+	for i, c := range numStr {
+		if c < '0' || c > '9' {
+			numStr = numStr[:i]
+			break
+		}
+	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// notifyAwaitingMerge posts a "PR ready, awaiting merge" comment and stores the comment ID.
+func (r *CodingTaskReconciler) notifyAwaitingMerge(ctx context.Context, task *agentsv1alpha1.CodingTask, prURL string) error {
+	if r.Notifier == nil {
+		return nil
+	}
+	owner, repo, issueNumber := r.resolveTrackingIssue(task)
+	if owner == "" || repo == "" || issueNumber == 0 {
+		return nil
+	}
+	if slices.Contains(task.Status.NotifiedPhases, "awaiting-merge") {
+		return nil
+	}
+
+	commentID, err := r.Notifier.NotifyAwaitingMerge(ctx, owner, repo, issueNumber, prURL)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to post awaiting-merge comment")
+		return nil // non-fatal
+	}
+
+	task.Status.PRCommentID = &commentID
+	task.Status.NotifiedPhases = append(task.Status.NotifiedPhases, "awaiting-merge")
+	if err := r.Status().Update(ctx, task); err != nil {
+		task.Status.PRCommentID = nil
+		task.Status.NotifiedPhases = task.Status.NotifiedPhases[:len(task.Status.NotifiedPhases)-1]
+		return fmt.Errorf("persisting awaiting-merge comment ID: %w", err)
+	}
+	return nil
+}
+
+// closeTrackingIssue closes the tracking GitHub issue for a task.
+func (r *CodingTaskReconciler) closeTrackingIssue(ctx context.Context, task *agentsv1alpha1.CodingTask) {
+	if r.Notifier == nil {
+		return
+	}
+	owner, repo, issueNumber := r.resolveTrackingIssue(task)
+	if owner == "" || repo == "" || issueNumber == 0 {
+		return
+	}
+	if err := r.Notifier.CloseIssue(ctx, owner, repo, issueNumber); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to close tracking issue", "issue", issueNumber)
+	}
+}
+
+// resolveTrackingIssue returns owner, repo, issueNumber from the task's tracking issue
+// or source GitHub issue.
+func (r *CodingTaskReconciler) resolveTrackingIssue(task *agentsv1alpha1.CodingTask) (string, string, int) {
+	if task.Status.TrackingIssue != nil {
+		return task.Status.TrackingIssue.Owner, task.Status.TrackingIssue.Repo, task.Status.TrackingIssue.IssueNumber
+	}
+	if task.Spec.Source.Type == agentsv1alpha1.TaskSourceGitHubIssue && task.Spec.Source.GitHub != nil {
+		return task.Spec.Source.GitHub.Owner, task.Spec.Source.GitHub.Repo, task.Spec.Source.GitHub.IssueNumber
+	}
+	return "", "", 0
 }
 
 // broadcast sends a real-time event if a Broadcaster is configured.

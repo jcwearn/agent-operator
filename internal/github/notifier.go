@@ -78,6 +78,112 @@ func (n *Notifier) NotifyFailed(ctx context.Context, owner, repo string, issue i
 	return n.postComment(ctx, owner, repo, issue, body)
 }
 
+// NotifyAwaitingMerge posts a comment indicating the PR is ready and awaiting merge.
+// Returns the comment ID for change-request feedback detection.
+func (n *Notifier) NotifyAwaitingMerge(ctx context.Context, owner, repo string, issue int, prURL string) (int64, error) {
+	body := fmt.Sprintf("## Awaiting Merge\n\nPull request created: %s\n\nI'll close this issue automatically when the PR is merged.\n\n**To request changes**, reply to this issue with your feedback and I'll update the PR.", prURL)
+	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+	if err != nil {
+		return 0, err
+	}
+	return comment.GetID(), nil
+}
+
+// CloseIssue closes a GitHub issue.
+func (n *Notifier) CloseIssue(ctx context.Context, owner, repo string, issue int) error {
+	state := "closed"
+	_, _, err := n.client.Issues.Edit(ctx, owner, repo, issue,
+		&gogithub.IssueRequest{State: &state})
+	return err
+}
+
+// CheckPRStatus checks whether a pull request has been merged or closed.
+func (n *Notifier) CheckPRStatus(ctx context.Context, owner, repo string, prNumber int) (controller.PRStatus, error) {
+	pr, _, err := n.client.PullRequests.Get(ctx, owner, repo, prNumber)
+	if err != nil {
+		return controller.PRStatus{}, fmt.Errorf("getting PR %d: %w", prNumber, err)
+	}
+	return controller.PRStatus{
+		Merged: pr.GetMerged(),
+		Closed: pr.GetState() == "closed",
+	}, nil
+}
+
+// CheckForFeedback looks for non-bot comments posted after the given anchor comment ID.
+// Returns the body of the first such comment, or empty string if none found.
+func (n *Notifier) CheckForFeedback(ctx context.Context, owner, repo string, issue int, afterCommentID int64) (string, error) {
+	comments, _, err := n.client.Issues.ListComments(ctx, owner, repo, issue,
+		&gogithub.IssueListCommentsOptions{
+			ListOptions: gogithub.ListOptions{PerPage: 100},
+		})
+	if err != nil {
+		return "", fmt.Errorf("listing comments: %w", err)
+	}
+
+	for _, c := range comments {
+		if c.GetID() > afterCommentID && c.GetUser() != nil && c.GetUser().GetType() != "Bot" {
+			return c.GetBody(), nil
+		}
+	}
+	return "", nil
+}
+
+// CheckForReviewFeedback looks for PR reviews with "changes_requested" state submitted
+// after the anchor comment. It fetches the anchor comment's timestamp, then finds
+// matching reviews and aggregates the review body with any inline comments.
+func (n *Notifier) CheckForReviewFeedback(ctx context.Context, owner, repo string, prNumber int, anchorCommentID int64) (string, error) {
+	// Fetch the anchor comment to get its creation time.
+	anchor, _, err := n.client.Issues.GetComment(ctx, owner, repo, anchorCommentID)
+	if err != nil {
+		return "", fmt.Errorf("fetching anchor comment: %w", err)
+	}
+	anchorTime := anchor.GetCreatedAt().Time
+
+	// List reviews on the PR.
+	reviews, _, err := n.client.PullRequests.ListReviews(ctx, owner, repo, prNumber,
+		&gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		return "", fmt.Errorf("listing PR reviews: %w", err)
+	}
+
+	// Find the first CHANGES_REQUESTED review submitted after the anchor.
+	var review *gogithub.PullRequestReview
+	for _, r := range reviews {
+		if r.GetState() == "CHANGES_REQUESTED" && r.GetSubmittedAt().After(anchorTime) {
+			review = r
+			break
+		}
+	}
+	if review == nil {
+		return "", nil
+	}
+
+	// Build feedback from review body + inline comments.
+	var b strings.Builder
+	if body := review.GetBody(); body != "" {
+		b.WriteString(body)
+		b.WriteString("\n\n")
+	}
+
+	// Fetch inline review comments.
+	comments, _, err := n.client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, review.GetID(),
+		&gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		// Non-fatal — return what we have from the review body.
+		if b.Len() > 0 {
+			return strings.TrimSpace(b.String()), nil
+		}
+		return "", fmt.Errorf("listing review comments: %w", err)
+	}
+
+	for _, c := range comments {
+		fmt.Fprintf(&b, "**%s:%d** — %s\n", c.GetPath(), c.GetLine(), c.GetBody())
+	}
+
+	return strings.TrimSpace(b.String()), nil
+}
+
 // CheckApproval checks if the plan comment has been approved via a thumbs-up reaction,
 // or if a human has left feedback as a reply. When approved, it also parses the
 // plan comment body to determine whether the "Run tests" checkbox was checked

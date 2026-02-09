@@ -291,6 +291,11 @@ func (in *CodingTaskStatus) DeepCopyInto(out *CodingTaskStatus) {
 		*out = new(PullRequestInfo)
 		**out = **in
 	}
+	if in.PRCommentID != nil {
+		in, out := &in.PRCommentID, &out.PRCommentID
+		*out = new(int64)
+		**out = **in
+	}
 	if in.StartedAt != nil {
 		in, out := &in.StartedAt, &out.StartedAt
 		*out = (*in).DeepCopy()
