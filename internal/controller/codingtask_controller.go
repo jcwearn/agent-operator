@@ -1030,6 +1030,15 @@ func (r *CodingTaskReconciler) agentImage(task *agentsv1alpha1.CodingTask) strin
 // createAgentRun creates an AgentRun for the given step.
 func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep, prompt, contextStr string) (*agentsv1alpha1.AgentRun, error) {
 	runName := fmt.Sprintf("%s-%s-%d", task.Name, step, time.Now().Unix())
+	maxTurns := r.maxTurnsForStep(task, step)
+
+	// Tell the agent about its turn budget so it can plan accordingly.
+	// Hitting the limit causes a hard error, so the agent needs to finish before that.
+	if maxTurns != nil {
+		prompt += fmt.Sprintf("\n\nIMPORTANT: You have a budget of %d agentic turns for this step. "+
+			"Exceeding this limit will cause an error. Plan your work to complete well within "+
+			"this budget — be focused, avoid unnecessary exploration, and prioritize finishing the task.", *maxTurns)
+	}
 
 	run := &agentsv1alpha1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1053,7 +1062,7 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			ServiceAccountName: task.Spec.ServiceAccountName,
 			Context:            contextStr,
 			Model:              r.modelForStep(task, step),
-			MaxTurns:           r.maxTurnsForStep(task, step),
+			MaxTurns:           maxTurns,
 		},
 	}
 
