@@ -972,8 +972,20 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 	}
 }
 
+// Default max turns per step, calibrated to typical task complexity:
+//   plan:         15 turns  — explore codebase, design approach (complex/new feature)
+//   implement:    50 turns  — multi-file edits, iterative coding (large task workflow)
+//   test:          8 turns  — run tests, check output (multi-file operation)
+//   pull-request:  3 turns  — create PR, write description (small task)
+var defaultMaxTurns = map[agentsv1alpha1.AgentRunStep]int{
+	agentsv1alpha1.AgentRunStepPlan:        15,
+	agentsv1alpha1.AgentRunStepImplement:   50,
+	agentsv1alpha1.AgentRunStepTest:        8,
+	agentsv1alpha1.AgentRunStepPullRequest: 3,
+}
+
 // maxTurnsForStep returns the maxTurns to use for a given workflow step.
-// Priority: per-step override → global maxTurns → nil (unlimited).
+// Priority: per-step override → global maxTurns → built-in default.
 func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep) *int {
 	m := task.Spec.Model
 	switch step {
@@ -994,7 +1006,13 @@ func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, 
 			return m.PullRequestMaxTurns
 		}
 	}
-	return m.MaxTurns
+	if m.MaxTurns != nil {
+		return m.MaxTurns
+	}
+	if v, ok := defaultMaxTurns[step]; ok {
+		return &v
+	}
+	return nil
 }
 
 // agentImage returns the agent-runner image for the given task.
