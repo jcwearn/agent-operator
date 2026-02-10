@@ -972,8 +972,21 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 	}
 }
 
+// Default max turns per step, calibrated to typical task complexity:
+//
+//	plan:         15 turns  — explore codebase, design approach (complex/new feature)
+//	implement:    50 turns  — multi-file edits, iterative coding (large task workflow)
+//	test:          8 turns  — run tests, check output (multi-file operation)
+//	pull-request:  3 turns  — create PR, write description (small task)
+var defaultMaxTurns = map[agentsv1alpha1.AgentRunStep]int{
+	agentsv1alpha1.AgentRunStepPlan:        15,
+	agentsv1alpha1.AgentRunStepImplement:   50,
+	agentsv1alpha1.AgentRunStepTest:        8,
+	agentsv1alpha1.AgentRunStepPullRequest: 3,
+}
+
 // maxTurnsForStep returns the maxTurns to use for a given workflow step.
-// Priority: per-step override → global maxTurns → nil (unlimited).
+// Priority: per-step override → global maxTurns → built-in default.
 func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep) *int {
 	m := task.Spec.Model
 	switch step {
@@ -994,7 +1007,13 @@ func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, 
 			return m.PullRequestMaxTurns
 		}
 	}
-	return m.MaxTurns
+	if m.MaxTurns != nil {
+		return m.MaxTurns
+	}
+	if v, ok := defaultMaxTurns[step]; ok {
+		return &v
+	}
+	return nil
 }
 
 // agentImage returns the agent-runner image for the given task.
@@ -1012,6 +1031,15 @@ func (r *CodingTaskReconciler) agentImage(task *agentsv1alpha1.CodingTask) strin
 // createAgentRun creates an AgentRun for the given step.
 func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep, prompt, contextStr string) (*agentsv1alpha1.AgentRun, error) {
 	runName := fmt.Sprintf("%s-%s-%d", task.Name, step, time.Now().Unix())
+	maxTurns := r.maxTurnsForStep(task, step)
+
+	// Tell the agent about its turn budget so it can plan accordingly.
+	// Hitting the limit causes a hard error, so the agent needs to finish before that.
+	if maxTurns != nil {
+		prompt += fmt.Sprintf("\n\nIMPORTANT: You have a budget of %d agentic turns for this step. "+
+			"Exceeding this limit will cause an error. Plan your work to complete well within "+
+			"this budget — be focused, avoid unnecessary exploration, and prioritize finishing the task.", *maxTurns)
+	}
 
 	run := &agentsv1alpha1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1035,7 +1063,7 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			ServiceAccountName: task.Spec.ServiceAccountName,
 			Context:            contextStr,
 			Model:              r.modelForStep(task, step),
-			MaxTurns:           r.maxTurnsForStep(task, step),
+			MaxTurns:           maxTurns,
 		},
 	}
 
