@@ -1,8 +1,90 @@
 package github
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestSplitComment(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		maxLen     int
+		wantChunks int
+		check      func(t *testing.T, chunks []string)
+	}{
+		{
+			name:       "short body returns single chunk",
+			body:       "Hello world",
+			maxLen:     100,
+			wantChunks: 1,
+		},
+		{
+			name:       "exactly at limit returns single chunk",
+			body:       strings.Repeat("a", 100),
+			maxLen:     100,
+			wantChunks: 1,
+		},
+		{
+			name:       "splits at paragraph break",
+			body:       "First paragraph\n\nSecond paragraph\n\nThird paragraph",
+			maxLen:     40,
+			wantChunks: 2,
+			check: func(t *testing.T, chunks []string) {
+				// "First paragraph\n\nSecond paragraph" (34 chars) fits in 40-char limit.
+				if chunks[0] != "First paragraph\n\nSecond paragraph" {
+					t.Errorf("chunk 0 = %q, want %q", chunks[0], "First paragraph\\n\\nSecond paragraph")
+				}
+				if chunks[1] != "Third paragraph" {
+					t.Errorf("chunk 1 = %q, want %q", chunks[1], "Third paragraph")
+				}
+			},
+		},
+		{
+			name:       "splits at section header",
+			body:       "## Section 1\n\nContent one.\n\n## Section 2\n\nContent two.",
+			maxLen:     35,
+			wantChunks: 2,
+			check: func(t *testing.T, chunks []string) {
+				if !strings.HasPrefix(chunks[0], "## Section 1") {
+					t.Errorf("chunk 0 should start with section 1 header, got %q", chunks[0])
+				}
+			},
+		},
+		{
+			name:       "all chunks within limit",
+			body:       strings.Repeat("word ", 200),
+			maxLen:     100,
+			wantChunks: 0, // just check all fit
+			check: func(t *testing.T, chunks []string) {
+				for i, c := range chunks {
+					if len(c) > 100 {
+						t.Errorf("chunk %d length %d exceeds maxLen 100", i, len(c))
+					}
+				}
+				// Verify all content is preserved.
+				joined := strings.Join(chunks, "\n")
+				origWords := strings.Fields(strings.Repeat("word ", 200))
+				joinedWords := strings.Fields(joined)
+				if len(origWords) != len(joinedWords) {
+					t.Errorf("word count: got %d, want %d", len(joinedWords), len(origWords))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := splitComment(tt.body, tt.maxLen)
+			if tt.wantChunks > 0 && len(chunks) != tt.wantChunks {
+				t.Errorf("splitComment() returned %d chunks, want %d", len(chunks), tt.wantChunks)
+			}
+			if tt.check != nil {
+				tt.check(t, chunks)
+			}
+		})
+	}
+}
 
 func TestExtractCheckedDecisions(t *testing.T) {
 	tests := []struct {

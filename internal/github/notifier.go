@@ -21,42 +21,81 @@ func NewNotifier(client *Client) *Notifier {
 }
 
 // NotifyPlanReady posts the generated plan as a comment and returns the comment ID.
+// If the plan is too long for a single GitHub comment, it splits across multiple
+// comments with part headers. The returned comment ID is always the last comment
+// (the one with the approval footer), so CheckApproval works correctly.
 func (n *Notifier) NotifyPlanReady(ctx context.Context, owner, repo string, issue int, plan string) (int64, error) {
-	body := fmt.Sprintf("## Implementation Plan\n\n%s\n\n---\n\n- [ ] Run tests before creating PR\n\n**To approve this plan**, react with :+1: on this comment.\n**To request changes**, reply to this issue with your feedback.", plan)
-	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
-		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
-	if err != nil {
-		return 0, err
+	footer := "\n\n---\n\n- [ ] Run tests before creating PR\n\n**To approve this plan**, react with :+1: on this comment.\n**To request changes**, reply to this issue with your feedback."
+
+	// Reserve space for the header and footer in the size budget.
+	// Header "## Implementation Plan (Part X of Y)\n\n" is ~45 chars max.
+	chunks := splitComment(plan, maxCommentLen-len(footer)-50)
+
+	if len(chunks) == 1 {
+		body := fmt.Sprintf("## Implementation Plan\n\n%s%s", chunks[0], footer)
+		comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+			&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+		if err != nil {
+			return 0, err
+		}
+		return comment.GetID(), nil
 	}
-	return comment.GetID(), nil
+
+	// Multiple chunks — post each as a separate comment.
+	var lastID int64
+	for i, chunk := range chunks {
+		var body string
+		if i < len(chunks)-1 {
+			body = fmt.Sprintf("## Implementation Plan (Part %d of %d)\n\n%s", i+1, len(chunks), chunk)
+		} else {
+			body = fmt.Sprintf("## Implementation Plan (Part %d of %d)\n\n%s%s", i+1, len(chunks), chunk, footer)
+		}
+		comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+			&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+		if err != nil {
+			return 0, fmt.Errorf("posting plan part %d of %d: %w", i+1, len(chunks), err)
+		}
+		lastID = comment.GetID()
+	}
+	return lastID, nil
 }
 
 // NotifyRevisedPlan posts a revised plan as a comment with the changes summary visible
 // and the full plan collapsed in a <details> block. Returns the comment ID.
+// If the combined content exceeds GitHub's comment limit, it splits across multiple comments.
 func (n *Notifier) NotifyRevisedPlan(ctx context.Context, owner, repo string, issue int, changesSummary, fullPlan string) (int64, error) {
-	body := fmt.Sprintf(`## Revised Implementation Plan
+	footer := "\n\n---\n- [ ] Run tests before creating PR\n\n**To approve this plan**, react with :+1: on this comment.\n**To request changes**, reply to this issue with your feedback."
 
-%s
+	planContent := fmt.Sprintf("%s\n\n<details>\n<summary>Click to expand full revised plan</summary>\n\n%s\n\n</details>", changesSummary, fullPlan)
 
-<details>
-<summary>Click to expand full revised plan</summary>
+	chunks := splitComment(planContent, maxCommentLen-len(footer)-55)
 
-%s
-
-</details>
-
----
-- [ ] Run tests before creating PR
-
-**To approve this plan**, react with :+1: on this comment.
-**To request changes**, reply to this issue with your feedback.`, changesSummary, fullPlan)
-
-	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
-		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
-	if err != nil {
-		return 0, err
+	if len(chunks) == 1 {
+		body := fmt.Sprintf("## Revised Implementation Plan\n\n%s%s", chunks[0], footer)
+		comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+			&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+		if err != nil {
+			return 0, err
+		}
+		return comment.GetID(), nil
 	}
-	return comment.GetID(), nil
+
+	var lastID int64
+	for i, chunk := range chunks {
+		var body string
+		if i < len(chunks)-1 {
+			body = fmt.Sprintf("## Revised Implementation Plan (Part %d of %d)\n\n%s", i+1, len(chunks), chunk)
+		} else {
+			body = fmt.Sprintf("## Revised Implementation Plan (Part %d of %d)\n\n%s%s", i+1, len(chunks), chunk, footer)
+		}
+		comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+			&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+		if err != nil {
+			return 0, fmt.Errorf("posting revised plan part %d of %d: %w", i+1, len(chunks), err)
+		}
+		lastID = comment.GetID()
+	}
+	return lastID, nil
 }
 
 // NotifyStepUpdate posts a status update for a workflow step.
@@ -254,6 +293,54 @@ func extractCheckedDecisions(body string) string {
 		}
 	}
 	return strings.Join(decisions, "\n")
+}
+
+// maxCommentLen is the maximum length for a single GitHub comment body.
+// GitHub's hard limit is 65,536 characters; we use 60,000 to leave headroom.
+const maxCommentLen = 60000
+
+// splitComment splits a long comment body into chunks that each fit within maxLen.
+// It tries to split at natural markdown boundaries: section headers ("\n## "),
+// horizontal rules ("\n---\n"), or paragraph breaks ("\n\n"). Falls back to
+// splitting at the last newline before maxLen if no better boundary is found.
+func splitComment(body string, maxLen int) []string {
+	if len(body) <= maxLen {
+		return []string{body}
+	}
+
+	var chunks []string
+	remaining := body
+
+	for len(remaining) > maxLen {
+		chunk := remaining[:maxLen]
+
+		// Try split points in order of preference.
+		splitIdx := -1
+		for _, sep := range []string{"\n## ", "\n---\n", "\n\n"} {
+			if idx := strings.LastIndex(chunk, sep); idx > 0 {
+				splitIdx = idx
+				break
+			}
+		}
+		// Fallback: split at last newline.
+		if splitIdx <= 0 {
+			if idx := strings.LastIndex(chunk, "\n"); idx > 0 {
+				splitIdx = idx
+			} else {
+				// No newline at all — hard split.
+				splitIdx = maxLen
+			}
+		}
+
+		chunks = append(chunks, strings.TrimRight(remaining[:splitIdx], "\n"))
+		remaining = strings.TrimLeft(remaining[splitIdx:], "\n")
+	}
+
+	if len(remaining) > 0 {
+		chunks = append(chunks, remaining)
+	}
+
+	return chunks
 }
 
 func (n *Notifier) postComment(ctx context.Context, owner, repo string, issue int, body string) error {
