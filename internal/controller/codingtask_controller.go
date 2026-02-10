@@ -42,6 +42,7 @@ type Notifier interface {
 	NotifyComplete(ctx context.Context, owner, repo string, issue int, prURL string) error
 	NotifyFailed(ctx context.Context, owner, repo string, issue int, reason string) error
 	NotifyAwaitingMerge(ctx context.Context, owner, repo string, issue int, prURL string) (int64, error)
+	NotifyModelSelection(ctx context.Context, owner, repo string, issue int) (int64, error)
 	CloseIssue(ctx context.Context, owner, repo string, issue int) error
 }
 
@@ -71,6 +72,20 @@ type ApprovalChecker interface {
 	CheckForReviewFeedback(ctx context.Context, owner, repo string, prNumber int, anchorCommentID int64) (string, error)
 }
 
+// ModelSelectionResult contains the parsed model choices from a model selection comment.
+type ModelSelectionResult struct {
+	Confirmed bool
+	Plan      string
+	Implement string
+	Test      string
+	PR        string
+}
+
+// ModelSelectionChecker checks whether model selection has been confirmed via GitHub reactions.
+type ModelSelectionChecker interface {
+	CheckModelSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (ModelSelectionResult, error)
+}
+
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
 type Broadcaster interface {
 	Broadcast(event BroadcastEvent)
@@ -88,12 +103,13 @@ type BroadcastEvent struct {
 // CodingTaskReconciler reconciles a CodingTask object.
 type CodingTaskReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	Notifier          Notifier        // optional, nil-safe
-	Broadcaster       Broadcaster     // optional, nil-safe
-	ApprovalChecker   ApprovalChecker // optional; if nil, plans are auto-approved
-	PRStatusChecker   PRStatusChecker // optional; if nil, awaiting-merge polling is disabled
-	DefaultAgentImage string          // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
+	Scheme                *runtime.Scheme
+	Notifier              Notifier              // optional, nil-safe
+	Broadcaster           Broadcaster           // optional, nil-safe
+	ApprovalChecker       ApprovalChecker       // optional; if nil, plans are auto-approved
+	PRStatusChecker       PRStatusChecker       // optional; if nil, awaiting-merge polling is disabled
+	ModelSelectionChecker ModelSelectionChecker // optional; if nil, model selection is skipped
+	DefaultAgentImage     string                // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
@@ -129,6 +145,8 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	switch task.Status.Phase {
 	case agentsv1alpha1.TaskPhasePending:
 		return r.handlePending(ctx, &task)
+	case agentsv1alpha1.TaskPhaseAwaitingModelSelection:
+		return r.handleAwaitingModelSelection(ctx, &task)
 	case agentsv1alpha1.TaskPhasePlanning:
 		return r.handlePlanning(ctx, &task)
 	case agentsv1alpha1.TaskPhaseAwaitingApproval:
@@ -147,8 +165,75 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 }
 
-// handlePending transitions a new task to the Planning phase by creating a plan AgentRun.
+// handlePending posts a model selection comment (for GitHub-sourced tasks) and
+// transitions to AwaitingModelSelection, or skips directly to Planning for
+// non-GitHub tasks or when no Notifier is configured.
 func (r *CodingTaskReconciler) handlePending(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Skip model selection for non-GitHub tasks or when notifier is unavailable.
+	if r.Notifier == nil || task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		log.Info("skipping model selection (non-GitHub source or no notifier), going straight to Planning")
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	gh := task.Spec.Source.GitHub
+	commentID, err := r.Notifier.NotifyModelSelection(ctx, gh.Owner, gh.Repo, gh.IssueNumber)
+	if err != nil {
+		log.Error(err, "failed to post model selection comment, proceeding to Planning")
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	task.Status.Phase = agentsv1alpha1.TaskPhaseAwaitingModelSelection
+	task.Status.ModelSelectionCommentID = &commentID
+	task.Status.Message = "Awaiting model selection"
+	r.broadcast(task)
+
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// handleAwaitingModelSelection polls for a :+1: reaction on the model selection comment.
+// Once confirmed, it parses the checked models, stores them in ModelOverrides, and transitions to Planning.
+func (r *CodingTaskReconciler) handleAwaitingModelSelection(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// If no comment ID or no checker, skip to Planning with defaults.
+	if task.Status.ModelSelectionCommentID == nil || r.ModelSelectionChecker == nil {
+		log.Info("no model selection comment or checker, proceeding to Planning")
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	gh := task.Spec.Source.GitHub
+	result, err := r.ModelSelectionChecker.CheckModelSelection(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.ModelSelectionCommentID)
+	if err != nil {
+		log.Error(err, "failed to check model selection")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if !result.Confirmed {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	log.Info("model selection confirmed", "plan", result.Plan, "implement", result.Implement, "test", result.Test, "pr", result.PR)
+	task.Status.ModelOverrides = &agentsv1alpha1.ModelConfig{
+		Plan:        result.Plan,
+		Implement:   result.Implement,
+		Test:        result.Test,
+		PullRequest: result.PR,
+	}
+
+	return r.transitionToPlanning(ctx, task)
+}
+
+// transitionToPlanning creates a plan AgentRun and moves to the Planning phase.
+func (r *CodingTaskReconciler) transitionToPlanning(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.Info("transitioning task to Planning phase")
 
@@ -827,8 +912,35 @@ func (r *CodingTaskReconciler) failTask(ctx context.Context, task *agentsv1alpha
 	return ctrl.Result{}, nil
 }
 
-// modelForStep returns the model to use for a given workflow step, falling back to the default.
+// modelForStep returns the model to use for a given workflow step.
+// Priority: ModelOverrides (step-specific) → ModelOverrides.Default → Spec.Model (step-specific) → Spec.Model.Default → "sonnet"
 func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep) string {
+	// Check status-level overrides first (from model selection comment).
+	if o := task.Status.ModelOverrides; o != nil {
+		switch step {
+		case agentsv1alpha1.AgentRunStepPlan:
+			if o.Plan != "" {
+				return o.Plan
+			}
+		case agentsv1alpha1.AgentRunStepImplement:
+			if o.Implement != "" {
+				return o.Implement
+			}
+		case agentsv1alpha1.AgentRunStepTest:
+			if o.Test != "" {
+				return o.Test
+			}
+		case agentsv1alpha1.AgentRunStepPullRequest:
+			if o.PullRequest != "" {
+				return o.PullRequest
+			}
+		}
+		if o.Default != "" {
+			return o.Default
+		}
+	}
+
+	// Fall back to spec-level model config.
 	m := task.Spec.Model
 	switch step {
 	case agentsv1alpha1.AgentRunStepPlan:

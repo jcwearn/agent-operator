@@ -3,6 +3,8 @@ package github
 import (
 	"strings"
 	"testing"
+
+	"github.com/jcwearn/agent-operator/internal/controller"
 )
 
 func TestSplitComment(t *testing.T) {
@@ -134,6 +136,188 @@ func TestExtractCheckedDecisions(t *testing.T) {
 			got := extractCheckedDecisions(tt.body)
 			if got != tt.want {
 				t.Errorf("extractCheckedDecisions() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseModelSelections(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want controller.ModelSelectionResult
+	}{
+		{
+			name: "all defaults unchanged",
+			body: `## Model Selection
+
+Select the Claude model for each workflow step, then react with :+1: to confirm.
+
+### Plan
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Implement
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Test
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Pull Request
+- [x] Haiku 4.5 — fastest, lower cost
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+
+---
+**To confirm**, react with :+1: on this comment.`,
+			want: controller.ModelSelectionResult{
+				Plan:      "sonnet",
+				Implement: "sonnet",
+				Test:      "sonnet",
+				PR:        "haiku",
+			},
+		},
+		{
+			name: "all changed to opus",
+			body: `## Model Selection
+
+### Plan
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [x] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Implement
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [x] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Test
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [x] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Pull Request
+- [ ] Haiku 4.5 — fastest, lower cost
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [x] Opus 4 — most capable, slower`,
+			want: controller.ModelSelectionResult{
+				Plan:      "opus",
+				Implement: "opus",
+				Test:      "opus",
+				PR:        "opus",
+			},
+		},
+		{
+			name: "mixed selections",
+			body: `## Model Selection
+
+### Plan
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [x] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Implement
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Test
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [x] Haiku 4.5 — fastest, lower cost
+
+### Pull Request
+- [x] Haiku 4.5 — fastest, lower cost
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower`,
+			want: controller.ModelSelectionResult{
+				Plan:      "opus",
+				Implement: "sonnet",
+				Test:      "haiku",
+				PR:        "haiku",
+			},
+		},
+		{
+			name: "multiple checked in section uses first",
+			body: `## Model Selection
+
+### Plan
+- [x] Sonnet 4.5 — balanced speed and capability
+- [x] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Implement
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Test
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Pull Request
+- [x] Haiku 4.5 — fastest, lower cost
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower`,
+			want: controller.ModelSelectionResult{
+				Plan:      "sonnet",
+				Implement: "sonnet",
+				Test:      "sonnet",
+				PR:        "haiku",
+			},
+		},
+		{
+			name: "no checked in section uses fallback",
+			body: `## Model Selection
+
+### Plan
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Implement
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Test
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Pull Request
+- [ ] Haiku 4.5 — fastest, lower cost
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower`,
+			want: controller.ModelSelectionResult{
+				Plan:      "sonnet",
+				Implement: "sonnet",
+				Test:      "sonnet",
+				PR:        "haiku",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseModelSelections(tt.body)
+			if got.Plan != tt.want.Plan {
+				t.Errorf("Plan = %q, want %q", got.Plan, tt.want.Plan)
+			}
+			if got.Implement != tt.want.Implement {
+				t.Errorf("Implement = %q, want %q", got.Implement, tt.want.Implement)
+			}
+			if got.Test != tt.want.Test {
+				t.Errorf("Test = %q, want %q", got.Test, tt.want.Test)
+			}
+			if got.PR != tt.want.PR {
+				t.Errorf("PR = %q, want %q", got.PR, tt.want.PR)
 			}
 		})
 	}
