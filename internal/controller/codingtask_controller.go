@@ -973,10 +973,11 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 }
 
 // Default max turns per step, calibrated to typical task complexity:
-//   plan:         15 turns  — explore codebase, design approach (complex/new feature)
-//   implement:    50 turns  — multi-file edits, iterative coding (large task workflow)
-//   test:          8 turns  — run tests, check output (multi-file operation)
-//   pull-request:  3 turns  — create PR, write description (small task)
+//
+//	plan:         15 turns  — explore codebase, design approach (complex/new feature)
+//	implement:    50 turns  — multi-file edits, iterative coding (large task workflow)
+//	test:          8 turns  — run tests, check output (multi-file operation)
+//	pull-request:  3 turns  — create PR, write description (small task)
 var defaultMaxTurns = map[agentsv1alpha1.AgentRunStep]int{
 	agentsv1alpha1.AgentRunStepPlan:        15,
 	agentsv1alpha1.AgentRunStepImplement:   50,
