@@ -19,13 +19,16 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,8 +53,9 @@ type GitTokenProvider interface {
 type AgentRunReconciler struct {
 	client.Client
 	Scheme             *runtime.Scheme
-	GitTokenProvider   GitTokenProvider // optional; if set, injects a fresh token instead of using GitCredentialsRef
-	PodRetentionPeriod time.Duration    // how long to keep succeeded pods; 0 means delete immediately
+	Clientset          kubernetes.Interface // for reading pod logs (full output extraction)
+	GitTokenProvider   GitTokenProvider     // optional; if set, injects a fresh token instead of using GitCredentialsRef
+	PodRetentionPeriod time.Duration        // how long to keep succeeded pods; 0 means delete immediately
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -152,7 +156,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			run.Status.CompletedAt = &now
 
 			// Extract output from pod logs or termination message.
-			output := r.extractOutput(pod)
+			output := r.extractOutput(ctx, pod)
 			run.Status.Output = output
 
 			if err := r.Status().Update(ctx, &run); err != nil {
@@ -166,7 +170,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			now := metav1.Now()
 			run.Status.CompletedAt = &now
 
-			output := r.extractOutput(pod)
+			output := r.extractOutput(ctx, pod)
 			run.Status.Output = output
 			run.Status.Message = fmt.Sprintf("Agent pod failed: %s", pod.Status.Message)
 
@@ -413,8 +417,19 @@ func (r *AgentRunReconciler) findPod(ctx context.Context, run *agentsv1alpha1.Ag
 	return &pods.Items[0], nil
 }
 
-// extractOutput reads the termination message from the pod.
-func (r *AgentRunReconciler) extractOutput(pod *corev1.Pod) string {
+// extractOutput reads the full agent output, trying pod logs first (no size limit)
+// and falling back to the termination message (4096-byte K8s limit) for backwards
+// compatibility with older agent-runner images that don't emit log markers.
+func (r *AgentRunReconciler) extractOutput(ctx context.Context, pod *corev1.Pod) string {
+	log := logf.FromContext(ctx)
+
+	if output, err := r.extractOutputFromLogs(ctx, pod); err != nil {
+		log.V(1).Info("failed to extract output from pod logs, falling back to termination message", "pod", pod.Name, "error", err)
+	} else if output != "" {
+		return output
+	}
+
+	// Fallback: read from termination message.
 	if len(pod.Status.ContainerStatuses) > 0 {
 		cs := pod.Status.ContainerStatuses[0]
 		if cs.State.Terminated != nil && cs.State.Terminated.Message != "" {
@@ -422,6 +437,54 @@ func (r *AgentRunReconciler) extractOutput(pod *corev1.Pod) string {
 		}
 	}
 	return ""
+}
+
+const (
+	outputBeginMarker = "===AGENT_OUTPUT_BEGIN==="
+	outputEndMarker   = "===AGENT_OUTPUT_END==="
+)
+
+// extractOutputFromLogs reads the full agent output from pod logs by parsing the
+// content between ===AGENT_OUTPUT_BEGIN=== and ===AGENT_OUTPUT_END=== markers.
+// This avoids the 4096-byte Kubernetes termination message limit.
+func (r *AgentRunReconciler) extractOutputFromLogs(ctx context.Context, pod *corev1.Pod) (string, error) {
+	if r.Clientset == nil {
+		return "", fmt.Errorf("clientset not configured")
+	}
+
+	stream, err := r.Clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("opening log stream: %w", err)
+	}
+	defer stream.Close()
+
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		return "", fmt.Errorf("reading log stream: %w", err)
+	}
+
+	logs := string(data)
+
+	// Find the last occurrence of the markers (in case there are retries/multiple outputs).
+	beginIdx := strings.LastIndex(logs, outputBeginMarker)
+	if beginIdx == -1 {
+		return "", nil
+	}
+	afterBegin := beginIdx + len(outputBeginMarker)
+	// Skip the newline after the begin marker.
+	if afterBegin < len(logs) && logs[afterBegin] == '\n' {
+		afterBegin++
+	}
+
+	endIdx := strings.LastIndex(logs, outputEndMarker)
+	if endIdx == -1 || endIdx <= beginIdx {
+		return "", nil
+	}
+
+	output := logs[afterBegin:endIdx]
+	// Trim trailing newline that echo adds.
+	output = strings.TrimSuffix(output, "\n")
+	return output, nil
 }
 
 // buildGitTokenEnvVars returns the GIT_TOKEN env var (and optionally GITHUB_PAT).

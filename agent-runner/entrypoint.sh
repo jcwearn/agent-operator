@@ -27,6 +27,10 @@ log() {
 
 write_output() {
     local output="$1"
+    # Write full output to pod logs with markers for controller extraction.
+    echo "===AGENT_OUTPUT_BEGIN==="
+    echo "$output"
+    echo "===AGENT_OUTPUT_END==="
     # Write to termination message (truncated to 4096 bytes for K8s limit).
     echo "$output" | head -c 4096 > "$TERMINATION_MESSAGE_PATH"
     # Also write full output to a file.

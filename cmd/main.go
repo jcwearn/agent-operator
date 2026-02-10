@@ -293,6 +293,7 @@ func main() {
 	agentRunReconciler := &controller.AgentRunReconciler{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
+		Clientset:          clientset,
 		PodRetentionPeriod: podRetention,
 	}
 	if ghClient != nil {
