@@ -963,7 +963,38 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 	if m.Default != "" {
 		return m.Default
 	}
-	return "sonnet"
+	// Cost-optimized defaults: Haiku for simpler steps, Sonnet for complex ones.
+	switch step {
+	case agentsv1alpha1.AgentRunStepTest, agentsv1alpha1.AgentRunStepPullRequest:
+		return "haiku"
+	default:
+		return "sonnet"
+	}
+}
+
+// maxTurnsForStep returns the maxTurns to use for a given workflow step.
+// Priority: per-step override → global maxTurns → nil (unlimited).
+func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, step agentsv1alpha1.AgentRunStep) *int {
+	m := task.Spec.Model
+	switch step {
+	case agentsv1alpha1.AgentRunStepPlan:
+		if m.PlanMaxTurns != nil {
+			return m.PlanMaxTurns
+		}
+	case agentsv1alpha1.AgentRunStepImplement:
+		if m.ImplementMaxTurns != nil {
+			return m.ImplementMaxTurns
+		}
+	case agentsv1alpha1.AgentRunStepTest:
+		if m.TestMaxTurns != nil {
+			return m.TestMaxTurns
+		}
+	case agentsv1alpha1.AgentRunStepPullRequest:
+		if m.PullRequestMaxTurns != nil {
+			return m.PullRequestMaxTurns
+		}
+	}
+	return m.MaxTurns
 }
 
 // agentImage returns the agent-runner image for the given task.
@@ -1004,7 +1035,7 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			ServiceAccountName: task.Spec.ServiceAccountName,
 			Context:            contextStr,
 			Model:              r.modelForStep(task, step),
-			MaxTurns:           task.Spec.Model.MaxTurns,
+			MaxTurns:           r.maxTurnsForStep(task, step),
 		},
 	}
 

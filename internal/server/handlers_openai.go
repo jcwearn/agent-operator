@@ -61,9 +61,12 @@ func (s *APIServer) handleChatCompletions(w http.ResponseWriter, r *http.Request
 
 	systemBlocks, messages := anthropicpkg.TranslateMessages(req.Messages)
 
-	// Prepend our system prompt.
+	// Prepend our system prompt with cache control to reduce repeated input token costs.
 	systemBlocks = append([]sdkanthropic.TextBlockParam{
-		{Text: systemPrompt},
+		{
+			Text:         systemPrompt,
+			CacheControl: sdkanthropic.CacheControlEphemeralParam{Type: "ephemeral"},
+		},
 	}, systemBlocks...)
 
 	tools := s.buildTools()
@@ -312,6 +315,8 @@ func (s *APIServer) buildTools() []sdkanthropic.ToolUnionParam {
 				},
 				Required: []string{"name"},
 			},
+			// Cache breakpoint: system prompt + all tools are static, so cache them together.
+			CacheControl: sdkanthropic.CacheControlEphemeralParam{Type: "ephemeral"},
 		}},
 	}
 }
