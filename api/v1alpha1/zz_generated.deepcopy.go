@@ -276,6 +276,16 @@ func (in *CodingTaskStatus) DeepCopyInto(out *CodingTaskStatus) {
 		*out = make([]AgentRunReference, len(*in))
 		copy(*out, *in)
 	}
+	if in.ModelSelectionCommentID != nil {
+		in, out := &in.ModelSelectionCommentID, &out.ModelSelectionCommentID
+		*out = new(int64)
+		**out = **in
+	}
+	if in.ModelOverrides != nil {
+		in, out := &in.ModelOverrides, &out.ModelOverrides
+		*out = new(ModelConfig)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.PlanCommentID != nil {
 		in, out := &in.PlanCommentID, &out.PlanCommentID
 		*out = new(int64)
@@ -363,6 +373,26 @@ func (in *ModelConfig) DeepCopyInto(out *ModelConfig) {
 	*out = *in
 	if in.MaxTurns != nil {
 		in, out := &in.MaxTurns, &out.MaxTurns
+		*out = new(int)
+		**out = **in
+	}
+	if in.PlanMaxTurns != nil {
+		in, out := &in.PlanMaxTurns, &out.PlanMaxTurns
+		*out = new(int)
+		**out = **in
+	}
+	if in.ImplementMaxTurns != nil {
+		in, out := &in.ImplementMaxTurns, &out.ImplementMaxTurns
+		*out = new(int)
+		**out = **in
+	}
+	if in.TestMaxTurns != nil {
+		in, out := &in.TestMaxTurns, &out.TestMaxTurns
+		*out = new(int)
+		**out = **in
+	}
+	if in.PullRequestMaxTurns != nil {
+		in, out := &in.PullRequestMaxTurns, &out.PullRequestMaxTurns
 		*out = new(int)
 		**out = **in
 	}

@@ -157,9 +157,25 @@ type ModelConfig struct {
 	// +optional
 	PullRequest string `json:"pullRequest,omitempty"`
 
-	// maxTurns limits the number of agentic turns per step.
+	// maxTurns limits the number of agentic turns per step (global default).
 	// +optional
 	MaxTurns *int `json:"maxTurns,omitempty"`
+
+	// planMaxTurns overrides maxTurns for the planning step.
+	// +optional
+	PlanMaxTurns *int `json:"planMaxTurns,omitempty"`
+
+	// implementMaxTurns overrides maxTurns for the implementation step.
+	// +optional
+	ImplementMaxTurns *int `json:"implementMaxTurns,omitempty"`
+
+	// testMaxTurns overrides maxTurns for the testing step.
+	// +optional
+	TestMaxTurns *int `json:"testMaxTurns,omitempty"`
+
+	// pullRequestMaxTurns overrides maxTurns for the pull request step.
+	// +optional
+	PullRequestMaxTurns *int `json:"pullRequestMaxTurns,omitempty"`
 }
 
 // CodingTaskSpec defines the desired state of CodingTask.
