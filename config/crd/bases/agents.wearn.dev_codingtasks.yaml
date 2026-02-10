@@ -379,6 +379,39 @@ spec:
               message:
                 description: message provides a human-readable status message.
                 type: string
+              modelOverrides:
+                description: |-
+                  modelOverrides stores model selections from the GitHub model selection comment.
+                  These override the spec-level ModelConfig for each step.
+                properties:
+                  default:
+                    default: sonnet
+                    description: default is the model used when no step-specific override
+                      is set.
+                    type: string
+                  implement:
+                    description: implement overrides the model for the implementation
+                      step.
+                    type: string
+                  maxTurns:
+                    description: maxTurns limits the number of agentic turns per step.
+                    type: integer
+                  plan:
+                    description: plan overrides the model for the planning step.
+                    type: string
+                  pullRequest:
+                    description: pullRequest overrides the model for the pull request
+                      step.
+                    type: string
+                  test:
+                    description: test overrides the model for the testing step.
+                    type: string
+                type: object
+              modelSelectionCommentID:
+                description: modelSelectionCommentID is the GitHub comment ID for
+                  model selection polling.
+                format: int64
+                type: integer
               notifiedPhases:
                 description: |-
                   notifiedPhases tracks which notification keys have already been sent,
@@ -390,6 +423,7 @@ spec:
                 description: phase is the current workflow phase.
                 enum:
                 - Pending
+                - AwaitingModelSelection
                 - Planning
                 - AwaitingApproval
                 - Implementing
