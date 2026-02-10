@@ -276,6 +276,16 @@ func (in *CodingTaskStatus) DeepCopyInto(out *CodingTaskStatus) {
 		*out = make([]AgentRunReference, len(*in))
 		copy(*out, *in)
 	}
+	if in.ModelSelectionCommentID != nil {
+		in, out := &in.ModelSelectionCommentID, &out.ModelSelectionCommentID
+		*out = new(int64)
+		**out = **in
+	}
+	if in.ModelOverrides != nil {
+		in, out := &in.ModelOverrides, &out.ModelOverrides
+		*out = new(ModelConfig)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.PlanCommentID != nil {
 		in, out := &in.PlanCommentID, &out.PlanCommentID
 		*out = new(int64)
