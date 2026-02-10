@@ -193,9 +193,7 @@ func parseModelSelections(body string) controller.ModelSelectionResult {
 	}
 
 	// Split into sections by "### " headers.
-	sections := strings.Split(body, "### ")
-
-	for _, section := range sections {
+	for section := range strings.SplitSeq(body, "### ") {
 		if section == "" {
 			continue
 		}

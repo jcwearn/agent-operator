@@ -39,12 +39,12 @@ const (
 	TaskPhaseAwaitingModelSelection TaskPhase = "AwaitingModelSelection"
 	TaskPhasePlanning               TaskPhase = "Planning"
 	TaskPhaseAwaitingApproval       TaskPhase = "AwaitingApproval"
-	TaskPhaseImplementing     TaskPhase = "Implementing"
-	TaskPhaseTesting          TaskPhase = "Testing"
-	TaskPhasePullRequest      TaskPhase = "PullRequest"
-	TaskPhaseAwaitingMerge    TaskPhase = "AwaitingMerge"
-	TaskPhaseComplete         TaskPhase = "Complete"
-	TaskPhaseFailed           TaskPhase = "Failed"
+	TaskPhaseImplementing           TaskPhase = "Implementing"
+	TaskPhaseTesting                TaskPhase = "Testing"
+	TaskPhasePullRequest            TaskPhase = "PullRequest"
+	TaskPhaseAwaitingMerge          TaskPhase = "AwaitingMerge"
+	TaskPhaseComplete               TaskPhase = "Complete"
+	TaskPhaseFailed                 TaskPhase = "Failed"
 )
 
 // GitHubSource contains information about a GitHub issue source.
