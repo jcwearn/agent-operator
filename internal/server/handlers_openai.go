@@ -395,6 +395,10 @@ func (s *APIServer) toolCreateTask(r *http.Request, input json.RawMessage) (stri
 				Name: s.anthropicSecretName,
 				Key:  s.anthropicSecretKey,
 			},
+			GitCredentialsRef: agentsv1alpha1.SecretReference{
+				Name: s.gitCredentialsSecretName,
+				Key:  s.gitCredentialsSecretKey,
+			},
 		},
 	}
 

@@ -35,9 +35,11 @@ type APIServer struct {
 	anthropicClient *anthropicpkg.Client
 
 	// Default secret refs for tasks created via API.
-	anthropicSecretName string
-	anthropicSecretKey  string
-	taskNamespace       string
+	anthropicSecretName      string
+	anthropicSecretKey       string
+	gitCredentialsSecretName string
+	gitCredentialsSecretKey  string
+	taskNamespace            string
 }
 
 // Option configures the APIServer.
@@ -72,6 +74,14 @@ func WithAnthropicSecret(name, key string) Option {
 	}
 }
 
+// WithGitCredentialsSecret sets the default git credentials secret reference.
+func WithGitCredentialsSecret(name, key string) Option {
+	return func(s *APIServer) {
+		s.gitCredentialsSecretName = name
+		s.gitCredentialsSecretKey = key
+	}
+}
+
 // WithTaskNamespace sets the namespace where CodingTasks are created.
 func WithTaskNamespace(ns string) Option {
 	return func(s *APIServer) {
@@ -93,9 +103,11 @@ func NewAPIServer(c client.Client, addr string, opts ...Option) *APIServer {
 		addr:                addr,
 		log:                 ctrl.Log.WithName("api-server"),
 		hub:                 NewHub(),
-		anthropicSecretName: "anthropic-api-key",
-		anthropicSecretKey:  "api-key",
-		taskNamespace:       "agent-system",
+		anthropicSecretName:      "anthropic-api-key",
+		anthropicSecretKey:       "api-key",
+		gitCredentialsSecretName: "agent-operator-github",
+		gitCredentialsSecretKey:  "github-pat",
+		taskNamespace:            "agent-system",
 	}
 
 	for _, opt := range opts {
