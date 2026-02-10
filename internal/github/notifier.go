@@ -98,6 +98,149 @@ func (n *Notifier) NotifyRevisedPlan(ctx context.Context, owner, repo string, is
 	return lastID, nil
 }
 
+// NotifyModelSelection posts a model selection comment with checkboxes for each workflow step.
+// Returns the comment ID for polling reactions.
+func (n *Notifier) NotifyModelSelection(ctx context.Context, owner, repo string, issue int) (int64, error) {
+	body := `## Model Selection
+
+Select the Claude model for each workflow step, then react with :+1: to confirm.
+
+### Plan
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Implement
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Test
+- [x] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+- [ ] Haiku 4.5 — fastest, lower cost
+
+### Pull Request
+- [x] Haiku 4.5 — fastest, lower cost
+- [ ] Sonnet 4.5 — balanced speed and capability
+- [ ] Opus 4 — most capable, slower
+
+---
+**To confirm**, react with :+1: on this comment.`
+
+	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+	if err != nil {
+		return 0, err
+	}
+	return comment.GetID(), nil
+}
+
+// CheckModelSelection checks if the model selection comment has been confirmed via :+1: reaction.
+// If confirmed, it fetches the comment body and parses the checked model selections.
+func (n *Notifier) CheckModelSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (controller.ModelSelectionResult, error) {
+	reactions, _, err := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
+		&gogithub.ListOptions{PerPage: 100})
+	if err != nil {
+		return controller.ModelSelectionResult{}, fmt.Errorf("listing reactions: %w", err)
+	}
+
+	hasThumbsUp := false
+	for _, r := range reactions {
+		if r.GetContent() == "+1" {
+			hasThumbsUp = true
+			break
+		}
+	}
+
+	if !hasThumbsUp {
+		return controller.ModelSelectionResult{}, nil
+	}
+
+	// Fetch the comment body to parse checked models.
+	comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
+	if err != nil {
+		// Confirmed but can't read body — return defaults.
+		return controller.ModelSelectionResult{
+			Confirmed: true,
+			Plan:      "sonnet",
+			Implement: "sonnet",
+			Test:      "sonnet",
+			PR:        "haiku",
+		}, nil
+	}
+
+	result := parseModelSelections(comment.GetBody())
+	result.Confirmed = true
+	return result, nil
+}
+
+// modelDisplayNameToAlias maps a display name from the model selection comment to the short alias.
+var modelDisplayNameToAlias = map[string]string{
+	"Sonnet 4.5": "sonnet",
+	"Opus 4":     "opus",
+	"Haiku 4.5":  "haiku",
+}
+
+// parseModelSelections parses the checked model selections from a model selection comment body.
+// It splits by "### " headers and finds the first "- [x]" line in each section.
+func parseModelSelections(body string) controller.ModelSelectionResult {
+	result := controller.ModelSelectionResult{
+		Plan:      "sonnet",
+		Implement: "sonnet",
+		Test:      "sonnet",
+		PR:        "haiku",
+	}
+
+	// Split into sections by "### " headers.
+	for section := range strings.SplitSeq(body, "### ") {
+		if section == "" {
+			continue
+		}
+
+		// Get the section title (first line).
+		lines := strings.SplitN(section, "\n", 2)
+		title := strings.TrimSpace(lines[0])
+		if len(lines) < 2 {
+			continue
+		}
+
+		// Find the first checked checkbox.
+		model := ""
+		for line := range strings.SplitSeq(lines[1], "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "- [x] ") {
+				// Extract the model name (everything before " — ").
+				rest := trimmed[len("- [x] "):]
+				if idx := strings.Index(rest, " — "); idx >= 0 {
+					rest = rest[:idx]
+				}
+				if alias, ok := modelDisplayNameToAlias[rest]; ok {
+					model = alias
+					break
+				}
+			}
+		}
+
+		if model == "" {
+			continue
+		}
+
+		switch title {
+		case "Plan":
+			result.Plan = model
+		case "Implement":
+			result.Implement = model
+		case "Test":
+			result.Test = model
+		case "Pull Request":
+			result.PR = model
+		}
+	}
+
+	return result
+}
+
 // NotifyStepUpdate posts a status update for a workflow step.
 func (n *Notifier) NotifyStepUpdate(ctx context.Context, owner, repo string, issue int, step, status, msg string) error {
 	emoji := statusEmoji(status)

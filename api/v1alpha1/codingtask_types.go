@@ -31,19 +31,20 @@ const (
 )
 
 // TaskPhase defines the current phase of a CodingTask.
-// +kubebuilder:validation:Enum=Pending;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
+// +kubebuilder:validation:Enum=Pending;AwaitingModelSelection;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
 type TaskPhase string
 
 const (
-	TaskPhasePending          TaskPhase = "Pending"
-	TaskPhasePlanning         TaskPhase = "Planning"
-	TaskPhaseAwaitingApproval TaskPhase = "AwaitingApproval"
-	TaskPhaseImplementing     TaskPhase = "Implementing"
-	TaskPhaseTesting          TaskPhase = "Testing"
-	TaskPhasePullRequest      TaskPhase = "PullRequest"
-	TaskPhaseAwaitingMerge    TaskPhase = "AwaitingMerge"
-	TaskPhaseComplete         TaskPhase = "Complete"
-	TaskPhaseFailed           TaskPhase = "Failed"
+	TaskPhasePending                TaskPhase = "Pending"
+	TaskPhaseAwaitingModelSelection TaskPhase = "AwaitingModelSelection"
+	TaskPhasePlanning               TaskPhase = "Planning"
+	TaskPhaseAwaitingApproval       TaskPhase = "AwaitingApproval"
+	TaskPhaseImplementing           TaskPhase = "Implementing"
+	TaskPhaseTesting                TaskPhase = "Testing"
+	TaskPhasePullRequest            TaskPhase = "PullRequest"
+	TaskPhaseAwaitingMerge          TaskPhase = "AwaitingMerge"
+	TaskPhaseComplete               TaskPhase = "Complete"
+	TaskPhaseFailed                 TaskPhase = "Failed"
 )
 
 // GitHubSource contains information about a GitHub issue source.
@@ -300,6 +301,15 @@ type CodingTaskStatus struct {
 	// Used to determine whether to post a collapsed revised plan or a fresh plan.
 	// +optional
 	PlanRevision int `json:"planRevision,omitempty"`
+
+	// modelSelectionCommentID is the GitHub comment ID for model selection polling.
+	// +optional
+	ModelSelectionCommentID *int64 `json:"modelSelectionCommentID,omitempty"`
+
+	// modelOverrides stores model selections from the GitHub model selection comment.
+	// These override the spec-level ModelConfig for each step.
+	// +optional
+	ModelOverrides *ModelConfig `json:"modelOverrides,omitempty"`
 
 	// planCommentID is the GitHub comment ID where the plan was posted,
 	// used for tracking approval reactions.
