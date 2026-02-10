@@ -224,6 +224,13 @@ func main() {
 	if name := os.Getenv("ANTHROPIC_SECRET_NAME"); name != "" {
 		apiOpts = append(apiOpts, server.WithAnthropicSecret(name, "api-key"))
 	}
+	if name := os.Getenv("GIT_CREDENTIALS_SECRET_NAME"); name != "" {
+		key := "github-pat"
+		if k := os.Getenv("GIT_CREDENTIALS_SECRET_KEY"); k != "" {
+			key = k
+		}
+		apiOpts = append(apiOpts, server.WithGitCredentialsSecret(name, key))
+	}
 	if ghClient != nil {
 		apiOpts = append(apiOpts, server.WithGitHubClient(ghClient))
 		if secret := os.Getenv("GITHUB_WEBHOOK_SECRET"); secret != "" {

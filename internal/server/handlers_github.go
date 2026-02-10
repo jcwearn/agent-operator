@@ -130,6 +130,10 @@ func (s *APIServer) handleIssuesEvent(ctx context.Context, event *gogithub.Issue
 				Name: s.anthropicSecretName,
 				Key:  s.anthropicSecretKey,
 			},
+			GitCredentialsRef: agentsv1alpha1.SecretReference{
+				Name: s.gitCredentialsSecretName,
+				Key:  s.gitCredentialsSecretKey,
+			},
 		},
 	}
 

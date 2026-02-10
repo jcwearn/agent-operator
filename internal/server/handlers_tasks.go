@@ -89,6 +89,10 @@ func (s *APIServer) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 				Name: s.anthropicSecretName,
 				Key:  s.anthropicSecretKey,
 			},
+			GitCredentialsRef: agentsv1alpha1.SecretReference{
+				Name: s.gitCredentialsSecretName,
+				Key:  s.gitCredentialsSecretKey,
+			},
 		},
 	}
 
