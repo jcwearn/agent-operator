@@ -86,6 +86,7 @@ func NewModelsResponse() ModelsResponse {
 		Data: []Model{
 			{ID: "claude-sonnet-4-5", Object: "model", Created: now, OwnedBy: "anthropic"},
 			{ID: "claude-opus-4", Object: "model", Created: now, OwnedBy: "anthropic"},
+			{ID: "claude-haiku-4-5", Object: "model", Created: now, OwnedBy: "anthropic"},
 		},
 	}
 }
