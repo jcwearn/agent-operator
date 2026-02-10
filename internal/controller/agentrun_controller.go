@@ -456,7 +456,7 @@ func (r *AgentRunReconciler) extractOutputFromLogs(ctx context.Context, pod *cor
 	if err != nil {
 		return "", fmt.Errorf("opening log stream: %w", err)
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	data, err := io.ReadAll(stream)
 	if err != nil {
