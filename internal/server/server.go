@@ -99,10 +99,10 @@ func WithClientset(cs kubernetes.Interface) Option {
 // NewAPIServer creates a new API server.
 func NewAPIServer(c client.Client, addr string, opts ...Option) *APIServer {
 	s := &APIServer{
-		client:              c,
-		addr:                addr,
-		log:                 ctrl.Log.WithName("api-server"),
-		hub:                 NewHub(),
+		client:                   c,
+		addr:                     addr,
+		log:                      ctrl.Log.WithName("api-server"),
+		hub:                      NewHub(),
 		anthropicSecretName:      "anthropic-api-key",
 		anthropicSecretKey:       "api-key",
 		gitCredentialsSecretName: "agent-operator-github",
