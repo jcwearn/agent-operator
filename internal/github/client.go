@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	gogithub "github.com/google/go-github/v68/github"
+	gogithub "github.com/google/go-github/v82/github"
 )
 
 // Client wraps the GitHub API client with App authentication.

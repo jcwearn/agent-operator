@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	gogithub "github.com/google/go-github/v68/github"
+	gogithub "github.com/google/go-github/v82/github"
 	"github.com/jcwearn/agent-operator/internal/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -140,7 +140,7 @@ Select the Claude model for each workflow step, then react with :+1: to confirm.
 // If confirmed, it fetches the comment body and parses the checked model selections.
 func (n *Notifier) CheckModelSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (controller.ModelSelectionResult, error) {
 	reactions, _, err := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
-		&gogithub.ListOptions{PerPage: 100})
+		&gogithub.ListReactionOptions{ListOptions: gogithub.ListOptions{PerPage: 100}})
 	if err != nil {
 		return controller.ModelSelectionResult{}, fmt.Errorf("listing reactions: %w", err)
 	}
@@ -375,7 +375,7 @@ func (n *Notifier) CheckApproval(ctx context.Context, owner, repo string, issue 
 
 	// Check reactions on the plan comment.
 	reactions, _, reactErr := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
-		&gogithub.ListOptions{PerPage: 100})
+		&gogithub.ListReactionOptions{ListOptions: gogithub.ListOptions{PerPage: 100}})
 	if reactErr != nil {
 		// Log but don't return — fall through to comment feedback check.
 		log.Error(reactErr, "failed to list reactions, falling back to comment check")
