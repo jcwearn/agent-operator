@@ -6,7 +6,7 @@ require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-logr/logr v1.4.3
-	github.com/google/go-github/v68 v68.0.0
+	github.com/google/go-github/v82 v82.0.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
