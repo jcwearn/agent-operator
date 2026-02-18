@@ -129,6 +129,10 @@ AIDER_OUTPUT=$(aider \
     --no-auto-commits \
     --no-auto-lint \
     --no-suggest-shell-commands \
+    --no-show-model-warnings \
+    --no-pretty \
+    --no-stream \
+    --no-gitignore \
     2>&1) || {
     log "Aider exited with non-zero status"
     write_output "$AIDER_OUTPUT"
@@ -140,7 +144,20 @@ log "Aider completed"
 # Post-processing based on step.
 case "$AGENT_STEP" in
     plan)
-        write_output "$AIDER_OUTPUT"
+        # Filter aider startup noise from plan output.
+        FILTERED_OUTPUT=$(echo "$AIDER_OUTPUT" | grep -v -E \
+            -e '^Aider v' \
+            -e '^Model:' \
+            -e '^Git repo:' \
+            -e '^Repo-map:' \
+            -e '^Use /help' \
+            -e '^https?://' \
+            -e 'Scanning repo' \
+            -e '^\s*$' \
+            -e '^─' \
+            -e '\.aider' \
+            || true)
+        write_output "${FILTERED_OUTPUT:-$AIDER_OUTPUT}"
         ;;
     implement)
         # Push the work branch with changes.

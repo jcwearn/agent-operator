@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
@@ -61,8 +63,11 @@ func (o *Ollama) PodEnvVars(_ *agentsv1alpha1.SecretReference, baseURL string) [
 	if url == "" {
 		url = o.DefaultBaseURL()
 	}
+	// Append /v1 so litellm's OpenAI SDK constructs the correct
+	// /v1/chat/completions path against Ollama's OpenAI-compatible endpoint.
+	apiBase := strings.TrimRight(url, "/") + "/v1"
 	return []corev1.EnvVar{
-		{Name: "OPENAI_API_BASE", Value: url},
+		{Name: "OPENAI_API_BASE", Value: apiBase},
 		{Name: "OPENAI_API_KEY", Value: "ollama"},
 	}
 }
