@@ -61,8 +61,9 @@ spec:
                   If empty, the operator's DEFAULT_AGENT_IMAGE env var is used.
                 type: string
               anthropicApiKeyRef:
-                description: anthropicAPIKeyRef references the Secret containing the
-                  Anthropic API key.
+                description: |-
+                  anthropicAPIKeyRef references the Secret containing the Anthropic API key.
+                  Deprecated: Use provider instead. Kept for backward compatibility.
                 properties:
                   key:
                     description: key is the key within the Secret.
@@ -97,7 +98,7 @@ spec:
                 minimum: 0
                 type: integer
               model:
-                description: model configures which Claude model to use for each workflow
+                description: model configures which model to use for each workflow
                   step.
                 properties:
                   default:
@@ -149,6 +150,43 @@ spec:
                   agent.
                 minLength: 1
                 type: string
+              provider:
+                description: |-
+                  provider configures which LLM provider to use for this task.
+                  If not set, defaults to claude using anthropicApiKeyRef.
+                properties:
+                  apiKeyRef:
+                    description: |-
+                      apiKeyRef references the Secret containing the API key.
+                      Not required for providers that don't need API keys (e.g., ollama).
+                    properties:
+                      key:
+                        description: key is the key within the Secret.
+                        type: string
+                      name:
+                        description: name is the name of the Secret.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  baseURL:
+                    description: |-
+                      baseURL overrides the default API endpoint for this provider.
+                      For ollama, defaults to http://ollama.ollama.svc.cluster.local:11434.
+                    type: string
+                  name:
+                    description: name is the provider identifier (e.g., "claude",
+                      "ollama").
+                    enum:
+                    - claude
+                    - ollama
+                    - openai
+                    - gemini
+                    type: string
+                required:
+                - name
+                type: object
               repository:
                 description: repository defines the target Git repository.
                 properties:
@@ -279,7 +317,6 @@ spec:
                   type: object
                 type: array
             required:
-            - anthropicApiKeyRef
             - prompt
             - repository
             - source

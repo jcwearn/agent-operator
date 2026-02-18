@@ -306,7 +306,8 @@ Select the Claude model for each workflow step, then react with :+1: to confirm.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseModelSelections(tt.body)
+			n := &Notifier{}
+			got := n.parseModelSelections(tt.body)
 			if got.Plan != tt.want.Plan {
 				t.Errorf("Plan = %q, want %q", got.Plan, tt.want.Plan)
 			}

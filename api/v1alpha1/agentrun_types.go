@@ -75,9 +75,23 @@ type AgentRunSpec struct {
 	// +optional
 	Resources TaskResources `json:"resources,omitempty"`
 
+	// provider is the LLM provider name (e.g., "claude", "ollama").
+	// +optional
+	Provider string `json:"provider,omitempty"`
+
+	// apiKeyRef references the Secret containing the provider's API key.
+	// Not required for providers that don't need API keys (e.g., ollama).
+	// +optional
+	APIKeyRef *SecretReference `json:"apiKeyRef,omitempty"`
+
+	// baseURL overrides the default API endpoint for the provider.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+
 	// anthropicAPIKeyRef references the Secret containing the Anthropic API key.
-	// +required
-	AnthropicAPIKeyRef SecretReference `json:"anthropicApiKeyRef"`
+	// Deprecated: Use provider + apiKeyRef instead. Kept for backward compatibility.
+	// +optional
+	AnthropicAPIKeyRef SecretReference `json:"anthropicApiKeyRef,omitempty"`
 
 	// gitCredentialsRef references the Secret containing Git credentials.
 	// Optional when the operator is configured with a GitHub App (tokens are minted automatically).
@@ -94,7 +108,7 @@ type AgentRunSpec struct {
 	// +optional
 	Context string `json:"context,omitempty"`
 
-	// model is the Claude model to use for this run (e.g., "sonnet", "opus").
+	// model is the model to use for this run (e.g., "sonnet", "qwen2.5:7b").
 	// +optional
 	Model string `json:"model,omitempty"`
 

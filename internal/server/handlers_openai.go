@@ -23,7 +23,7 @@ const (
 	defaultBranchName       = "main"
 )
 
-const systemPrompt = `You are Claude, an AI assistant integrated with an agentic coding platform. You can help users with questions and also create coding tasks that will be executed by autonomous coding agents.
+const claudeSystemPrompt = `You are Claude, an AI assistant integrated with an agentic coding platform. You can help users with questions and also create coding tasks that will be executed by autonomous coding agents.
 
 When a user asks you to make changes to a codebase, fix a bug, implement a feature, or do any coding work, use the create_coding_task tool. This will create a CodingTask resource and a GitHub issue to track the work.
 
@@ -31,18 +31,20 @@ You can also list, inspect, and approve existing coding tasks using the availabl
 
 When creating tasks, write a clear, detailed prompt that describes what the coding agent should do. Include relevant context, file paths, and acceptance criteria when possible.`
 
-// handleListModels returns the hardcoded list of available models.
+const ollamaSystemPrompt = `You are an AI assistant integrated with an agentic coding platform. You can help users with questions about code, software engineering, and general topics.`
+
+// handleListModels returns the list of available models from all providers.
 func (s *APIServer) handleListModels(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, http.StatusOK, anthropicpkg.NewModelsResponse())
+	if s.providerRegistry != nil {
+		respondJSON(w, http.StatusOK, anthropicpkg.NewModelsResponseFromProviders(s.providerRegistry))
+	} else {
+		respondJSON(w, http.StatusOK, anthropicpkg.NewModelsResponse())
+	}
 }
 
 // handleChatCompletions handles OpenAI-compatible chat completion requests.
+// Routes to the appropriate backend based on the requested model.
 func (s *APIServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	if s.anthropicClient == nil {
-		respondError(w, http.StatusServiceUnavailable, "Anthropic client not configured")
-		return
-	}
-
 	var req anthropicpkg.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid JSON body")
@@ -51,6 +53,22 @@ func (s *APIServer) handleChatCompletions(w http.ResponseWriter, r *http.Request
 
 	if len(req.Messages) == 0 {
 		respondError(w, http.StatusBadRequest, "messages are required")
+		return
+	}
+
+	// Route based on model name.
+	if s.chatRouter != nil && s.chatRouter.route(req.Model) == backendOllama {
+		s.handleOllamaChat(w, r, req)
+		return
+	}
+
+	s.handleClaudeChat(w, r, req)
+}
+
+// handleClaudeChat handles chat completions via the Anthropic API.
+func (s *APIServer) handleClaudeChat(w http.ResponseWriter, r *http.Request, req anthropicpkg.ChatCompletionRequest) {
+	if s.anthropicClient == nil {
+		respondError(w, http.StatusServiceUnavailable, "Anthropic client not configured")
 		return
 	}
 
@@ -64,7 +82,7 @@ func (s *APIServer) handleChatCompletions(w http.ResponseWriter, r *http.Request
 	// Prepend our system prompt with cache control to reduce repeated input token costs.
 	systemBlocks = append([]sdkanthropic.TextBlockParam{
 		{
-			Text:         systemPrompt,
+			Text:         claudeSystemPrompt,
 			CacheControl: sdkanthropic.CacheControlEphemeralParam{Type: "ephemeral"},
 		},
 	}, systemBlocks...)
@@ -83,6 +101,74 @@ func (s *APIServer) handleChatCompletions(w http.ResponseWriter, r *http.Request
 		s.handleStreamingChat(w, r, params, req.Model)
 	} else {
 		s.handleNonStreamingChat(w, r, params, req.Model)
+	}
+}
+
+// handleOllamaChat handles chat completions via an OpenAI-compatible endpoint (Ollama).
+func (s *APIServer) handleOllamaChat(w http.ResponseWriter, r *http.Request, req anthropicpkg.ChatCompletionRequest) {
+	if s.ollamaClient == nil {
+		respondError(w, http.StatusServiceUnavailable, "Ollama client not configured")
+		return
+	}
+
+	// Prepend system prompt.
+	req.Messages = append([]anthropicpkg.ChatMessage{
+		{Role: "system", Content: ollamaSystemPrompt},
+	}, req.Messages...)
+
+	if req.Stream {
+		s.handleOllamaStreamingChat(w, r, req)
+	} else {
+		s.handleOllamaNonStreamingChat(w, r, req)
+	}
+}
+
+// handleOllamaNonStreamingChat proxies a non-streaming request to Ollama.
+func (s *APIServer) handleOllamaNonStreamingChat(w http.ResponseWriter, r *http.Request, req anthropicpkg.ChatCompletionRequest) {
+	resp, err := s.ollamaClient.Chat(r.Context(), req)
+	if err != nil {
+		s.log.Error(err, "ollama chat error")
+		respondError(w, http.StatusBadGateway, "failed to get response from Ollama")
+		return
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// handleOllamaStreamingChat proxies a streaming request to Ollama.
+func (s *APIServer) handleOllamaStreamingChat(w http.ResponseWriter, r *http.Request, req anthropicpkg.ChatCompletionRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	events, err := s.ollamaClient.ChatStream(r.Context(), req)
+	if err != nil {
+		s.log.Error(err, "ollama stream error")
+		respondError(w, http.StatusBadGateway, "failed to stream from Ollama")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	for event := range events {
+		if event.Err != nil {
+			s.log.Error(event.Err, "ollama stream event error")
+			break
+		}
+		if event.Done {
+			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			break
+		}
+		if event.Chunk != nil {
+			data, _ := json.Marshal(event.Chunk)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
 	}
 }
 

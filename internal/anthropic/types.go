@@ -1,6 +1,10 @@
 package anthropic
 
-import "time"
+import (
+	"time"
+
+	"github.com/jcwearn/agent-operator/internal/provider"
+)
 
 // ChatCompletionRequest is the OpenAI-compatible chat completion request.
 type ChatCompletionRequest struct {
@@ -78,7 +82,7 @@ type Model struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// NewModelsResponse returns the hardcoded list of available models.
+// NewModelsResponse returns the hardcoded list of Claude models (fallback).
 func NewModelsResponse() ModelsResponse {
 	now := time.Now().Unix()
 	return ModelsResponse{
@@ -88,5 +92,24 @@ func NewModelsResponse() ModelsResponse {
 			{ID: "claude-opus-4", Object: "model", Created: now, OwnedBy: "anthropic"},
 			{ID: "claude-haiku-4-5", Object: "model", Created: now, OwnedBy: "anthropic"},
 		},
+	}
+}
+
+// NewModelsResponseFromProviders builds a models list from the provider registry.
+func NewModelsResponseFromProviders(registry *provider.Registry) ModelsResponse {
+	now := time.Now().Unix()
+	allModels := registry.AllModels()
+	data := make([]Model, 0, len(allModels))
+	for _, m := range allModels {
+		data = append(data, Model{
+			ID:      m.ID,
+			Object:  "model",
+			Created: now,
+			OwnedBy: m.OwnedBy,
+		})
+	}
+	return ModelsResponse{
+		Object: "list",
+		Data:   data,
 	}
 }

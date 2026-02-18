@@ -1,208 +1,112 @@
 # Provider-Agnostic Coding Agents
 
-> **Status:** Planning. Not yet started.
+> **Status:** Phase 1 complete. Ollama + Aider is the first new provider.
 > **Prerequisite:** Builds on [001-agentic-coding-platform.md](./001-agentic-coding-platform.md) (Phases 1-3 complete).
 
 ## Context
 
-The agent-operator is tightly coupled to Claude/Anthropic at every layer. The goal is to support Claude, OpenAI, and Gemini as first-class providers for both the agentic coding pipeline (CodingTask -> PR) and the chat proxy (`/v1/chat/completions`). Each provider should use its native CLI for best coding quality (Claude Code, Codex CLI, Gemini CLI), and the chat proxy should route to the correct backend based on model name.
+The agent-operator was tightly coupled to Claude/Anthropic at every layer. The goal is to support multiple LLM providers for both the agentic coding pipeline (CodingTask -> PR) and the chat proxy (`/v1/chat/completions`).
 
-**Key insight:** Claude Code CLI is the linchpin -- it provides the agentic reasoning loop, built-in tools (file read/write, bash, glob, grep), and git operations. Any approach must either replace or abstract around it.
+**Approach:** Ollama with local models (qwen2.5) is the first new provider, using Aider as the agent framework. This allows experimentation with local models at zero API cost. Claude remains the default provider with full backward compatibility.
 
-**Separable concerns:** The chat proxy (`/v1/chat/completions` for Open WebUI) and the agentic coding pipeline are independent. Open WebUI already connects directly to OpenAI and Gemini APIs, so the chat proxy is lower priority.
+## Coupling Inventory (7 surfaces, all addressed)
 
-## Approach: Provider CRD + Multi-Image + Multi-Provider Chat Proxy
-
-**Agent runners:** Separate container images per provider, each using the native CLI (best quality per provider). The controller selects the right image based on `spec.provider.name`.
-
-**Chat proxy:** Anthropic SDK for Claude models, `go-openai` SDK for OpenAI + Gemini (both support OpenAI-compatible API format). Tool-use (task CRUD) works across all providers.
-
-**Rollout:** 4 incremental phases, each independently shippable.
-
-## Coupling Inventory (7 surfaces)
-
-1. **CRD types** -- `AnthropicAPIKeyRef`, `ModelConfig` defaults to "sonnet"
-2. **Agent-runner Dockerfile** -- installs `@anthropic-ai/claude-code` via npm
-3. **Agent-runner entrypoint.sh** -- invokes `claude --print`, requires `ANTHROPIC_API_KEY`
-4. **AgentRun controller** -- injects `ANTHROPIC_API_KEY` env var into pods
-5. **CodingTask controller** -- `modelForStep()` defaults to "sonnet", passes `AnthropicAPIKeyRef`
-6. **GitHub notifier** -- hardcoded model names "Sonnet 4.5", "Opus 4", "Haiku 4.5"
-7. **Chat proxy + Anthropic package** -- Anthropic SDK for `/v1/chat/completions`
+1. **CRD types** -- `ProviderSpec` added alongside deprecated `AnthropicAPIKeyRef`
+2. **Agent-runner image** -- Separate image per framework (Claude Code vs Aider)
+3. **Agent-runner entrypoint** -- Each framework has its own entrypoint with the same env var contract
+4. **AgentRun controller** -- Uses provider registry for env var injection
+5. **CodingTask controller** -- Uses provider registry for image/model defaults
+6. **GitHub notifier** -- Dynamic model selection from provider registry
+7. **Chat proxy** -- Routes by model name to correct backend (Anthropic SDK vs Ollama)
 
 ---
 
-## Phase A: CRD + Controller Generalization (v0.6.0)
+## Phase 1: Ollama + Aider (v0.6.0) -- COMPLETE
 
-Decouple the CRD and controller from Anthropic-specific types. Claude remains the only provider, but the abstraction is in place.
+### 1A. CRD + Provider Interface
 
-### A1. CRD Changes (`api/v1alpha1/codingtask_types.go`)
-- Add `ProviderSpec` struct:
-  ```go
-  type ProviderSpec struct {
-      // +kubebuilder:validation:Enum=claude;openai;gemini
-      // +kubebuilder:default=claude
-      Name string `json:"name"`
-      APIKeyRef SecretReference `json:"apiKeyRef"`
-  }
-  ```
-- Add `spec.provider` field to `CodingTaskSpec` (optional, defaults to claude)
-- Deprecate `spec.anthropicApiKeyRef` -- keep it functional with defaulting logic:
-  - If `spec.provider` is set, use it
-  - If only `spec.anthropicApiKeyRef` is set, auto-populate `provider: {name: claude, apiKeyRef: <same ref>}`
-- Change `ModelConfig.Default` from hardcoded `"sonnet"` to empty string (controller resolves per provider)
+**CRD changes:**
+- Added `ProviderType` enum (`claude`, `ollama`, `openai`, `gemini`) to `CodingTaskSpec`
+- Added `ProviderSpec` struct with `Name`, `APIKeyRef *SecretReference`, `BaseURL string`
+- Added `Provider *ProviderSpec` to `CodingTaskSpec` (optional, defaults to claude)
+- Added `Provider string`, `APIKeyRef *SecretReference`, `BaseURL string` to `AgentRunSpec`
+- `AnthropicAPIKeyRef` kept as deprecated-but-functional on both CRDs
 
-### A2. CRD Changes (`api/v1alpha1/agentrun_types.go`)
-- Add `Provider string` and generic `APIKeyRef SecretReference` fields to `AgentRunSpec`
-- Deprecate `AnthropicAPIKeyRef` with same backward-compat logic
+**Provider package (`internal/provider/`):**
+- `Provider` interface: `Name()`, `DefaultImage()`, `DefaultModel()`, `DefaultModelForStep()`, `APIKeyEnvVar()`, `APIKeyRequired()`, `DefaultBaseURL()`, `AvailableModels()`, `PodEnvVars()`
+- `Claude` provider: image `ghcr.io/jcwearn/agent-runner`, model "sonnet", env `ANTHROPIC_API_KEY`
+- `Ollama` provider: image `ghcr.io/jcwearn/agent-runner-aider`, model "qwen2.5:7b", env `OPENAI_API_BASE` + `OPENAI_API_KEY=ollama`
+- `Registry` with `Get()`, `MustGet()`, `All()`, `AllModels()`, `WithOllamaBaseURL()` option
 
-### A3. New provider package (`internal/provider/`)
-- `provider.go` -- `Provider` interface and registry:
-  ```go
-  type Provider interface {
-      Name() string
-      DefaultImage() string
-      DefaultModel() string
-      APIKeyEnvVar() string          // e.g. "ANTHROPIC_API_KEY", "OPENAI_API_KEY"
-      AvailableModels() []ModelInfo  // for GitHub UI + /v1/models
-  }
-  ```
-- `claude.go` -- Claude provider (image: `agent-runner:tag`, default model: `sonnet`, env: `ANTHROPIC_API_KEY`, models: Sonnet/Opus/Haiku)
-- `openai.go` -- OpenAI provider (stub for Phase B)
-- `gemini.go` -- Gemini provider (stub for Phase C)
-- `registry.go` -- `Get(name string) Provider` lookup
+**Controller updates:**
+- `CodingTaskReconciler`: `resolveProvider()` helper, updated `agentImage()` and `modelForStep()` to use provider registry
+- `AgentRunReconciler`: `buildProviderEnvVars()` method with backward compat fallback to `AnthropicAPIKeyRef`
 
-### A4. Controller updates
-- `codingtask_controller.go`:
-  - `modelForStep()` -- resolve default model from provider instead of hardcoded "sonnet"
-  - `createAgentRun()` -- populate `Provider` + `APIKeyRef` from `spec.provider` (with backward-compat fallback to `anthropicApiKeyRef`)
-- `agentrun_controller.go`:
-  - `createPod()` -- use `provider.APIKeyEnvVar()` for the env var name, `provider.DefaultImage()` for image fallback
+**Notifier update:**
+- Dynamic model selection comment from provider registry
+- `parseModelSelections()` builds display-name-to-ID map dynamically
 
-### A5. GitHub notifier (`internal/github/notifier.go`)
-- Model selection comment generated dynamically from `provider.AvailableModels()` instead of hardcoded Claude models
+**Files modified:** `api/v1alpha1/codingtask_types.go`, `api/v1alpha1/agentrun_types.go`, `internal/controller/codingtask_controller.go`, `internal/controller/agentrun_controller.go`, `internal/github/notifier.go`, `cmd/main.go`
+**Files created:** `internal/provider/provider.go`, `internal/provider/claude.go`, `internal/provider/ollama.go`, `internal/provider/registry.go`
 
-### A6. CRD YAMLs + k3s-cluster manifests
-- Regenerate CRDs via `make manifests`
-- Update `infrastructure/agent-operator/crd-codingtasks.yaml` and `crd-agentruns.yaml`
-- No deployment.yaml changes needed (Claude is default)
+### 1B. Aider Agent Runner Image
 
-### Files modified:
-- `api/v1alpha1/codingtask_types.go`
-- `api/v1alpha1/agentrun_types.go`
-- `internal/controller/codingtask_controller.go`
-- `internal/controller/agentrun_controller.go`
-- `internal/github/notifier.go`
-- `cmd/main.go` (pass provider registry to controllers)
-- **New:** `internal/provider/provider.go`, `claude.go`, `openai.go`, `gemini.go`, `registry.go`
+New container image using Aider instead of Claude Code, same entrypoint contract.
+
+- `agent-runner-aider/Dockerfile`: Ubuntu 24.04 + Python 3 + Aider (`pip install aider-chat`) + GitHub CLI, same UID/GID (1000:1000), same directory layout
+- `agent-runner-aider/entrypoint.sh`: Same env var contract (`AGENT_STEP`, `AGENT_REPO_URL`, etc.), uses `OPENAI_API_BASE` + `OPENAI_API_KEY` instead of `ANTHROPIC_API_KEY`, invokes `aider --message --model openai/$MODEL --yes-always --no-auto-commits`
+- CI: Added `build-agent-runner-aider` job to `.github/workflows/release.yml`, pushes to `ghcr.io/jcwearn/agent-runner-aider`
+
+### 1C. Chat Proxy Multi-Provider Routing
+
+Routes `/v1/chat/completions` to the correct backend based on model name.
+
+- `internal/openaicompat/client.go`: Lightweight HTTP client for OpenAI-compatible endpoints (Ollama's `/v1/chat/completions`), supports both streaming and non-streaming
+- `internal/server/chat_router.go`: Routes by model ID -- Ollama model IDs go to Ollama backend, everything else to Claude
+- `handlers_openai.go`: Refactored `handleChatCompletions()` to route via `chatRouter`, extracted `handleClaudeChat()` and added `handleOllamaChat()` with streaming/non-streaming variants
+- `internal/anthropic/types.go`: Added `NewModelsResponseFromProviders()` for dynamic `/v1/models` from provider registry
+- `internal/server/server.go`: Added `ollamaClient`, `providerRegistry`, `chatRouter` fields with `WithOllamaClient()` and `WithProviderRegistry()` options
+
+### 1D. k3s-cluster Manifests
+
+- `infrastructure/agent-operator/deployment.yaml`: Added `OLLAMA_BASE_URL` env var pointing to `http://ollama.ollama.svc.cluster.local:11434`
+- `infrastructure/agent-operator/networkpolicy.yaml`: Added egress rule for port 11434 to ollama namespace
+- Updated CRD YAMLs (`crd-agentruns.yaml`, `crd-codingtasks.yaml`) from `make manifests`
 
 ---
 
-## Phase B: OpenAI Agent Runner (v0.7.0)
+## Phase 2: OpenAI / Codex CLI (planned)
 
-Add an OpenAI/Codex CLI agent-runner image. CodingTasks can now specify `provider.name: openai`.
+Add OpenAI as a provider using Codex CLI as the agent framework.
 
-### B1. New agent-runner-codex image
-- `agent-runner/Dockerfile.codex` -- Ubuntu base + Node.js + `@openai/codex` (Codex CLI)
-- `agent-runner/entrypoint-codex.sh` -- same env var contract (`AGENT_STEP`, `AGENT_PROMPT`, etc.), same output markers, invokes `codex --quiet --full-auto` with appropriate flags
-- Handles the 4 steps (plan, implement, test, pull-request) with Codex CLI equivalents of Claude Code's `--print` mode
+- New `agent-runner-codex` image with `@openai/codex` CLI
+- `internal/provider/openai.go` provider implementation
+- Chat proxy routing for `gpt-*`, `o3-*`, `o4-*` model prefixes
+- k3s-cluster: `openai-api-key` SOPS-encrypted secret
 
-### B2. Provider implementation (`internal/provider/openai.go`)
-- Fill in stub: image `ghcr.io/jcwearn/agent-runner-codex:tag`, default model `gpt-4.1`, env var `OPENAI_API_KEY`
-- Available models: `gpt-4.1`, `o3`, `o4-mini`, etc.
+## Phase 3: Gemini CLI (planned)
 
-### B3. GitHub Actions CI
-- New workflow to build and push `ghcr.io/jcwearn/agent-runner-codex` image
+Add Gemini as a provider using Gemini CLI (or Aider with Gemini models).
 
-### B4. k3s-cluster secrets
-- Add `openai-api-key` SOPS-encrypted secret to `infrastructure/agent-operator/secrets.sops.yaml`
-
-### Files modified:
-- `internal/provider/openai.go`
-- **New:** `agent-runner/Dockerfile.codex`, `agent-runner/entrypoint-codex.sh`
-- **New:** `.github/workflows/build-agent-runner-codex.yaml`
+- New `agent-runner-gemini` image
+- `internal/provider/gemini.go` provider implementation
+- Chat proxy routing for `gemini-*` model prefixes
+- k3s-cluster: `gemini-api-key` SOPS-encrypted secret
 
 ---
 
-## Phase C: Gemini Agent Runner (v0.8.0)
+## Backward Compatibility
 
-Add a Gemini CLI agent-runner image. CodingTasks can now specify `provider.name: gemini`.
-
-### C1. New agent-runner-gemini image
-- `agent-runner/Dockerfile.gemini` -- Ubuntu base + Node.js + Gemini CLI (or use Aider with Gemini models as a pragmatic alternative if Gemini CLI is immature)
-- `agent-runner/entrypoint-gemini.sh` -- same contract, invokes Gemini CLI
-
-### C2. Provider implementation (`internal/provider/gemini.go`)
-- Fill in stub: image, default model `gemini-2.5-pro`, env var `GEMINI_API_KEY`
-- Available models: `gemini-2.5-pro`, `gemini-2.5-flash`, etc.
-
-### C3. GitHub Actions CI + k3s-cluster secrets
-- Build workflow for `ghcr.io/jcwearn/agent-runner-gemini`
-- Add `gemini-api-key` SOPS-encrypted secret
-
-### Files modified:
-- `internal/provider/gemini.go`
-- **New:** `agent-runner/Dockerfile.gemini`, `agent-runner/entrypoint-gemini.sh`
-- **New:** `.github/workflows/build-agent-runner-gemini.yaml`
-
----
-
-## Phase D: Multi-Provider Chat Proxy (v0.9.0)
-
-Make the operator's `/v1/chat/completions` endpoint route to the correct LLM backend based on model name. Tool-use (task CRUD) works with all providers.
-
-### D1. New OpenAI client package (`internal/openaicompat/`)
-- Wraps `github.com/sashabaranov/go-openai` SDK
-- `client.go` -- `Chat()` and `ChatStream()` methods, configured with base URL + API key
-- Used for both OpenAI (`api.openai.com`) and Gemini (`generativelanguage.googleapis.com/v1beta/openai`)
-- Tool-use support: OpenAI and Gemini both support function calling in the OpenAI format
-
-### D2. Chat router (`internal/server/chat_router.go`)
-- New `ChatRouter` that maps model prefixes to backends:
-  - `claude-*` -> Anthropic SDK (existing `internal/anthropic/` client)
-  - `gpt-*`, `o1-*`, `o3-*`, `o4-*` -> OpenAI via `internal/openaicompat/` client
-  - `gemini-*` -> Gemini via `internal/openaicompat/` client (different base URL)
-- Implements a unified `Chat(model, messages, tools)` interface
-- Tool execution loop works identically regardless of backend (tool definitions are already OpenAI-format compatible)
-
-### D3. Refactor handlers_openai.go
-- Replace direct Anthropic SDK usage with `ChatRouter`
-- `handleNonStreamingChat()` and `handleStreamingChat()` use router instead of Anthropic client directly
-- System prompt made generic (remove "You are Claude" reference)
-- Keep existing tool definitions (create/list/get/approve coding task) -- they work with any provider's function calling
-
-### D4. Update `/v1/models` endpoint
-- `internal/anthropic/types.go` `NewModelsResponse()` replaced with dynamic model list from all provider registrations
-- Returns Claude + OpenAI + Gemini models
-
-### D5. Server wiring (`internal/server/server.go`, `cmd/main.go`)
-- `APIServer` gets a `chatRouter` field instead of `anthropicClient`
-- `cmd/main.go` initializes clients for each configured provider (based on which API key secrets exist)
-- Providers with no configured API key are skipped gracefully
-
-### D6. k3s-cluster Open WebUI config
-- Update `apps/open-webui/helm.yaml` `OPENAI_API_BASE_URLS` -- can potentially simplify to just the operator endpoint (since it now handles all providers) or keep separate direct connections
-- Update `DEFAULT_MODELS` if desired
-
-### Files modified:
-- `internal/server/handlers_openai.go` (major refactor)
-- `internal/server/server.go`
-- `internal/anthropic/types.go` (dynamic models list)
-- `cmd/main.go`
-- **New:** `internal/openaicompat/client.go`
-- **New:** `internal/server/chat_router.go`
-
----
-
-## Backward Compatibility Strategy
-
-- `spec.anthropicApiKeyRef` remains functional throughout all phases via defaulting webhook/logic
-- Existing CodingTask resources with no `spec.provider` default to `{name: claude, apiKeyRef: <anthropicApiKeyRef>}`
-- Old-style model names ("sonnet", "opus", "haiku") continue to work for Claude provider
-- New providers use fully-qualified model names (e.g., "gpt-4.1", "gemini-2.5-pro")
+- `spec.anthropicApiKeyRef` remains functional via controller defaulting logic
+- Existing CodingTasks with no `spec.provider` default to claude
+- Old-style model names ("sonnet", "opus", "haiku") continue to work
+- New providers use their native model names (e.g., "qwen2.5:7b", "gpt-4.1")
 
 ## Verification
 
-- **Phase A:** `make test`, `make manifests`, deploy v0.6.0, create a CodingTask with both old (`anthropicApiKeyRef`) and new (`provider`) syntax -- both should work
-- **Phase B:** Build codex image, create CodingTask with `provider.name: openai`, verify plan/implement/test/PR workflow
-- **Phase C:** Same for Gemini
-- **Phase D:** Chat via Open WebUI with each model prefix, verify tool-use works across all providers, verify `/v1/models` returns all available models
+1. **Unit tests**: `make test` -- tests pass for both old-style and new-style CodingTasks
+2. **Build images**: `docker build` the Aider runner, verify it works with Ollama
+3. **Deploy**: Push to k3s-cluster via FluxCD, update operator image tag
+4. **Agentic pipeline**: Create CodingTask with `provider.name: ollama`, verify Aider pod reaches Ollama
+5. **Chat proxy**: Send request to `/v1/chat/completions` with model `qwen2.5:7b`, verify routing to Ollama
+6. **Backward compat**: Existing CodingTasks with `anthropicApiKeyRef` work unchanged

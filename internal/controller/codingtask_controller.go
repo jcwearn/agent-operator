@@ -32,6 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
+	"github.com/jcwearn/agent-operator/internal/provider"
 )
 
 // Notifier posts status updates to external systems (e.g., GitHub issues).
@@ -110,6 +111,7 @@ type CodingTaskReconciler struct {
 	PRStatusChecker       PRStatusChecker       // optional; if nil, awaiting-merge polling is disabled
 	ModelSelectionChecker ModelSelectionChecker // optional; if nil, model selection is skipped
 	DefaultAgentImage     string                // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
+	ProviderRegistry      *provider.Registry    // provider registry for multi-provider support
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
@@ -963,7 +965,11 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 	if m.Default != "" {
 		return m.Default
 	}
-	// Cost-optimized defaults: Haiku for simpler steps, Sonnet for complex ones.
+	// Consult provider for step-specific defaults.
+	if p := r.resolveProvider(task); p != nil {
+		return p.DefaultModelForStep(step)
+	}
+	// Fallback: cost-optimized defaults for Claude.
 	switch step {
 	case agentsv1alpha1.AgentRunStepTest, agentsv1alpha1.AgentRunStepPullRequest:
 		return "haiku"
@@ -1016,11 +1022,31 @@ func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, 
 	return nil
 }
 
+// resolveProvider returns the provider for a task. If the task has a
+// spec.provider set, that provider is used. Otherwise, falls back to claude.
+func (r *CodingTaskReconciler) resolveProvider(task *agentsv1alpha1.CodingTask) provider.Provider {
+	if r.ProviderRegistry != nil && task.Spec.Provider != nil && task.Spec.Provider.Name != "" {
+		if p, err := r.ProviderRegistry.Get(string(task.Spec.Provider.Name)); err == nil {
+			return p
+		}
+	}
+	// Default to claude.
+	if r.ProviderRegistry != nil {
+		if p, err := r.ProviderRegistry.Get("claude"); err == nil {
+			return p
+		}
+	}
+	return nil
+}
+
 // agentImage returns the agent-runner image for the given task.
-// It prefers the task-level override, then the operator default, then the CRD default.
+// It prefers the task-level override, then the provider default, then the operator default.
 func (r *CodingTaskReconciler) agentImage(task *agentsv1alpha1.CodingTask) string {
 	if task.Spec.AgentImage != "" {
 		return task.Spec.AgentImage
+	}
+	if p := r.resolveProvider(task); p != nil {
+		return p.DefaultImage()
 	}
 	if r.DefaultAgentImage != "" {
 		return r.DefaultAgentImage
@@ -1041,6 +1067,19 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			"this budget — be focused, avoid unnecessary exploration, and prioritize finishing the task.", *maxTurns)
 	}
 
+	// Resolve provider fields for the AgentRun.
+	var providerName string
+	var apiKeyRef *agentsv1alpha1.SecretReference
+	var baseURL string
+	if task.Spec.Provider != nil {
+		providerName = string(task.Spec.Provider.Name)
+		apiKeyRef = task.Spec.Provider.APIKeyRef
+		baseURL = task.Spec.Provider.BaseURL
+	} else if task.Spec.AnthropicAPIKeyRef.Name != "" {
+		providerName = "claude"
+		apiKeyRef = &task.Spec.AnthropicAPIKeyRef
+	}
+
 	run := &agentsv1alpha1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      runName,
@@ -1058,6 +1097,9 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			Timeout:            task.Spec.StepTimeout,
 			Repository:         task.Spec.Repository,
 			Resources:          task.Spec.Resources,
+			Provider:           providerName,
+			APIKeyRef:          apiKeyRef,
+			BaseURL:            baseURL,
 			AnthropicAPIKeyRef: task.Spec.AnthropicAPIKeyRef,
 			GitCredentialsRef:  task.Spec.GitCredentialsRef,
 			ServiceAccountName: task.Spec.ServiceAccountName,
