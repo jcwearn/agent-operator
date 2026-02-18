@@ -11,6 +11,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const defaultProviderName = "claude"
+
 // Notifier posts status updates to GitHub issues.
 type Notifier struct {
 	client           *Client
@@ -136,7 +138,7 @@ func (n *Notifier) buildProviderSelectionBody() string {
 	if n.providerRegistry != nil {
 		for _, p := range n.providerRegistry.All() {
 			check := " "
-			if p.Name() == "claude" {
+			if p.Name() == defaultProviderName {
 				check = "x"
 			}
 			b.WriteString(fmt.Sprintf("- [%s] %s — %s\n", check, p.DisplayName(), p.ProviderDescription()))
@@ -172,7 +174,7 @@ func (n *Notifier) CheckProviderSelection(ctx context.Context, owner, repo strin
 
 	comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
 	if err != nil {
-		return controller.ProviderSelectionResult{Confirmed: true, Provider: "claude"}, nil
+		return controller.ProviderSelectionResult{Confirmed: true, Provider: defaultProviderName}, nil
 	}
 
 	providerID := n.parseProviderSelection(comment.GetBody())
@@ -184,7 +186,7 @@ func (n *Notifier) CheckProviderSelection(ctx context.Context, owner, repo strin
 func (n *Notifier) parseProviderSelection(body string) string {
 	displayNameMap := n.buildProviderDisplayNameMap()
 
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- [x] ") {
 			rest := trimmed[len("- [x] "):]
@@ -196,7 +198,7 @@ func (n *Notifier) parseProviderSelection(body string) string {
 			}
 		}
 	}
-	return "claude"
+	return defaultProviderName
 }
 
 // buildProviderDisplayNameMap maps provider display names to provider IDs from the registry.
@@ -209,7 +211,7 @@ func (n *Notifier) buildProviderDisplayNameMap() map[string]string {
 	}
 	// Always include fallback.
 	if _, ok := m["Claude Code"]; !ok {
-		m["Claude Code"] = "claude"
+		m["Claude Code"] = defaultProviderName
 	}
 	return m
 }
@@ -265,7 +267,7 @@ func (n *Notifier) buildModelSelectionBody(providerName string) string {
 	if len(providers) == 0 {
 		// Fallback: hardcoded Claude models.
 		providers = append(providers, providerModels{
-			name: "claude",
+			name: defaultProviderName,
 			models: []provider.ModelInfo{
 				{ID: "sonnet", DisplayName: "Sonnet 4.5", Description: "balanced speed and capability"},
 				{ID: "opus", DisplayName: "Opus 4", Description: "most capable, slower"},
@@ -277,7 +279,7 @@ func (n *Notifier) buildModelSelectionBody(providerName string) string {
 	// Determine defaults from the target provider.
 	targetProvider := providerName
 	if targetProvider == "" {
-		targetProvider = "claude"
+		targetProvider = defaultProviderName
 	}
 	if n.providerRegistry != nil {
 		if p, err := n.providerRegistry.Get(targetProvider); err == nil {

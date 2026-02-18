@@ -116,15 +116,15 @@ type BroadcastEvent struct {
 // CodingTaskReconciler reconciles a CodingTask object.
 type CodingTaskReconciler struct {
 	client.Client
-	Scheme                *runtime.Scheme
-	Notifier              Notifier              // optional, nil-safe
-	Broadcaster           Broadcaster           // optional, nil-safe
-	ApprovalChecker       ApprovalChecker       // optional; if nil, plans are auto-approved
-	PRStatusChecker       PRStatusChecker       // optional; if nil, awaiting-merge polling is disabled
+	Scheme                   *runtime.Scheme
+	Notifier                 Notifier                 // optional, nil-safe
+	Broadcaster              Broadcaster              // optional, nil-safe
+	ApprovalChecker          ApprovalChecker          // optional; if nil, plans are auto-approved
+	PRStatusChecker          PRStatusChecker          // optional; if nil, awaiting-merge polling is disabled
 	ModelSelectionChecker    ModelSelectionChecker    // optional; if nil, model selection is skipped
 	ProviderSelectionChecker ProviderSelectionChecker // optional; if nil, provider selection is skipped
 	DefaultAgentImage        string                   // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
-	ProviderRegistry      *provider.Registry    // provider registry for multi-provider support
+	ProviderRegistry         *provider.Registry       // provider registry for multi-provider support
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
