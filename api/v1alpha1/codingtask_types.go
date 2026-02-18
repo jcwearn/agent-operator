@@ -59,12 +59,13 @@ const (
 )
 
 // TaskPhase defines the current phase of a CodingTask.
-// +kubebuilder:validation:Enum=Pending;AwaitingModelSelection;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
+// +kubebuilder:validation:Enum=Pending;AwaitingProviderSelection;AwaitingModelSelection;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
 type TaskPhase string
 
 const (
-	TaskPhasePending                TaskPhase = "Pending"
-	TaskPhaseAwaitingModelSelection TaskPhase = "AwaitingModelSelection"
+	TaskPhasePending                   TaskPhase = "Pending"
+	TaskPhaseAwaitingProviderSelection TaskPhase = "AwaitingProviderSelection"
+	TaskPhaseAwaitingModelSelection    TaskPhase = "AwaitingModelSelection"
 	TaskPhasePlanning               TaskPhase = "Planning"
 	TaskPhaseAwaitingApproval       TaskPhase = "AwaitingApproval"
 	TaskPhaseImplementing           TaskPhase = "Implementing"
@@ -351,6 +352,14 @@ type CodingTaskStatus struct {
 	// Used to determine whether to post a collapsed revised plan or a fresh plan.
 	// +optional
 	PlanRevision int `json:"planRevision,omitempty"`
+
+	// providerSelectionCommentID is the GitHub comment ID for provider selection polling.
+	// +optional
+	ProviderSelectionCommentID *int64 `json:"providerSelectionCommentID,omitempty"`
+
+	// selectedProvider is the provider chosen via interactive selection on GitHub.
+	// +optional
+	SelectedProvider *ProviderType `json:"selectedProvider,omitempty"`
 
 	// modelSelectionCommentID is the GitHub comment ID for model selection polling.
 	// +optional

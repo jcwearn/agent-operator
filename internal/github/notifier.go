@@ -114,10 +114,111 @@ func (n *Notifier) NotifyRevisedPlan(ctx context.Context, owner, repo string, is
 	return lastID, nil
 }
 
-// NotifyModelSelection posts a model selection comment with checkboxes for each workflow step.
+// NotifyProviderSelection posts a provider selection comment with checkboxes for each provider.
 // Returns the comment ID for polling reactions.
-func (n *Notifier) NotifyModelSelection(ctx context.Context, owner, repo string, issue int) (int64, error) {
-	body := n.buildModelSelectionBody()
+func (n *Notifier) NotifyProviderSelection(ctx context.Context, owner, repo string, issue int) (int64, error) {
+	body := n.buildProviderSelectionBody()
+
+	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+	if err != nil {
+		return 0, err
+	}
+	return comment.GetID(), nil
+}
+
+// buildProviderSelectionBody generates the provider selection comment body from the provider registry.
+// Claude is checked by default.
+func (n *Notifier) buildProviderSelectionBody() string {
+	var b strings.Builder
+	b.WriteString("## Agent Selection\n\nChoose the agent framework for this task, then react with :+1: to confirm.\n\n")
+
+	if n.providerRegistry != nil {
+		for _, p := range n.providerRegistry.All() {
+			check := " "
+			if p.Name() == "claude" {
+				check = "x"
+			}
+			b.WriteString(fmt.Sprintf("- [%s] %s — %s\n", check, p.DisplayName(), p.ProviderDescription()))
+		}
+	} else {
+		b.WriteString("- [x] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API\n")
+	}
+
+	b.WriteString("\n---\n**To confirm**, react with :+1: on this comment.")
+	return b.String()
+}
+
+// CheckProviderSelection checks if the provider selection comment has been confirmed via :+1: reaction.
+// If confirmed, it fetches the comment body and parses the checked provider.
+func (n *Notifier) CheckProviderSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (controller.ProviderSelectionResult, error) {
+	reactions, _, err := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
+		&gogithub.ListReactionOptions{ListOptions: gogithub.ListOptions{PerPage: 100}})
+	if err != nil {
+		return controller.ProviderSelectionResult{}, fmt.Errorf("listing reactions: %w", err)
+	}
+
+	hasThumbsUp := false
+	for _, r := range reactions {
+		if r.GetContent() == "+1" {
+			hasThumbsUp = true
+			break
+		}
+	}
+
+	if !hasThumbsUp {
+		return controller.ProviderSelectionResult{}, nil
+	}
+
+	comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
+	if err != nil {
+		return controller.ProviderSelectionResult{Confirmed: true, Provider: "claude"}, nil
+	}
+
+	providerID := n.parseProviderSelection(comment.GetBody())
+	return controller.ProviderSelectionResult{Confirmed: true, Provider: providerID}, nil
+}
+
+// parseProviderSelection finds the checked provider in a provider selection comment body.
+// Returns the provider ID (e.g., "claude", "ollama"). Defaults to "claude" if nothing is checked.
+func (n *Notifier) parseProviderSelection(body string) string {
+	displayNameMap := n.buildProviderDisplayNameMap()
+
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [x] ") {
+			rest := trimmed[len("- [x] "):]
+			if idx := strings.Index(rest, " — "); idx >= 0 {
+				rest = rest[:idx]
+			}
+			if id, ok := displayNameMap[rest]; ok {
+				return id
+			}
+		}
+	}
+	return "claude"
+}
+
+// buildProviderDisplayNameMap maps provider display names to provider IDs from the registry.
+func (n *Notifier) buildProviderDisplayNameMap() map[string]string {
+	m := make(map[string]string)
+	if n.providerRegistry != nil {
+		for _, p := range n.providerRegistry.All() {
+			m[p.DisplayName()] = p.Name()
+		}
+	}
+	// Always include fallback.
+	if _, ok := m["Claude Code"]; !ok {
+		m["Claude Code"] = "claude"
+	}
+	return m
+}
+
+// NotifyModelSelection posts a model selection comment with checkboxes for each workflow step.
+// If providerName is non-empty, only models from that provider are shown.
+// Returns the comment ID for polling reactions.
+func (n *Notifier) NotifyModelSelection(ctx context.Context, owner, repo string, issue int, providerName string) (int64, error) {
+	body := n.buildModelSelectionBody(providerName)
 
 	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
 		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
@@ -128,7 +229,8 @@ func (n *Notifier) NotifyModelSelection(ctx context.Context, owner, repo string,
 }
 
 // buildModelSelectionBody generates the model selection comment body from the provider registry.
-func (n *Notifier) buildModelSelectionBody() string {
+// If providerName is non-empty, only that provider's models are shown.
+func (n *Notifier) buildModelSelectionBody(providerName string) string {
 	var b strings.Builder
 	b.WriteString("## Model Selection\n\nSelect the model for each workflow step, then react with :+1: to confirm.\n")
 
@@ -142,17 +244,25 @@ func (n *Notifier) buildModelSelectionBody() string {
 		{"Pull Request", ""},
 	}
 
-	// Collect all models grouped by provider.
+	// Collect models, optionally filtered by provider.
 	type providerModels struct {
 		name   string
 		models []provider.ModelInfo
 	}
 	var providers []providerModels
 	if n.providerRegistry != nil {
-		for name, p := range n.providerRegistry.All() {
-			providers = append(providers, providerModels{name: name, models: p.AvailableModels()})
+		if providerName != "" {
+			// Only show models from the specified provider.
+			if p, err := n.providerRegistry.Get(providerName); err == nil {
+				providers = append(providers, providerModels{name: p.Name(), models: p.AvailableModels()})
+			}
+		} else {
+			for name, p := range n.providerRegistry.All() {
+				providers = append(providers, providerModels{name: name, models: p.AvailableModels()})
+			}
 		}
-	} else {
+	}
+	if len(providers) == 0 {
 		// Fallback: hardcoded Claude models.
 		providers = append(providers, providerModels{
 			name: "claude",
@@ -164,15 +274,20 @@ func (n *Notifier) buildModelSelectionBody() string {
 		})
 	}
 
-	// Determine defaults: use the first Claude model's defaults if available.
+	// Determine defaults from the target provider.
+	targetProvider := providerName
+	if targetProvider == "" {
+		targetProvider = "claude"
+	}
 	if n.providerRegistry != nil {
-		if claude, err := n.providerRegistry.Get("claude"); err == nil {
-			steps[0].defaultModel = claude.DefaultModelForStep("plan")
-			steps[1].defaultModel = claude.DefaultModelForStep("implement")
-			steps[2].defaultModel = claude.DefaultModelForStep("test")
-			steps[3].defaultModel = claude.DefaultModelForStep("pull-request")
+		if p, err := n.providerRegistry.Get(targetProvider); err == nil {
+			steps[0].defaultModel = p.DefaultModelForStep("plan")
+			steps[1].defaultModel = p.DefaultModelForStep("implement")
+			steps[2].defaultModel = p.DefaultModelForStep("test")
+			steps[3].defaultModel = p.DefaultModelForStep("pull-request")
 		}
-	} else {
+	}
+	if steps[0].defaultModel == "" {
 		const fallbackDefault = "sonnet"
 		steps[0].defaultModel = fallbackDefault
 		steps[1].defaultModel = fallbackDefault

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jcwearn/agent-operator/internal/controller"
+	"github.com/jcwearn/agent-operator/internal/provider"
 )
 
 func TestSplitComment(t *testing.T) {
@@ -139,6 +140,76 @@ func TestExtractCheckedDecisions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseProviderSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "claude checked (default)",
+			body: `## Agent Selection
+
+Choose the agent framework for this task, then react with :+1: to confirm.
+
+- [x] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API
+- [ ] Aider + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama
+
+---
+**To confirm**, react with :+1: on this comment.`,
+			want: "claude",
+		},
+		{
+			name: "ollama checked",
+			body: `## Agent Selection
+
+Choose the agent framework for this task, then react with :+1: to confirm.
+
+- [ ] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API
+- [x] Aider + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama
+
+---
+**To confirm**, react with :+1: on this comment.`,
+			want: "ollama",
+		},
+		{
+			name: "nothing checked defaults to claude",
+			body: `## Agent Selection
+
+Choose the agent framework for this task, then react with :+1: to confirm.
+
+- [ ] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API
+- [ ] Aider + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama
+
+---
+**To confirm**, react with :+1: on this comment.`,
+			want: "claude",
+		},
+		{
+			name: "empty body defaults to claude",
+			body: "",
+			want: "claude",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Notifier{
+				providerRegistry: newTestProviderRegistry(),
+			}
+			got := n.parseProviderSelection(tt.body)
+			if got != tt.want {
+				t.Errorf("parseProviderSelection() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// newTestProviderRegistry creates a provider registry for testing.
+func newTestProviderRegistry() *provider.Registry {
+	return provider.NewRegistry()
 }
 
 func TestParseModelSelections(t *testing.T) {

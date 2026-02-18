@@ -11,6 +11,12 @@ type Claude struct{}
 
 func (c *Claude) Name() string { return "claude" }
 
+func (c *Claude) DisplayName() string { return "Claude Code" }
+
+func (c *Claude) ProviderDescription() string {
+	return "Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API"
+}
+
 func (c *Claude) DefaultImage() string { return "ghcr.io/jcwearn/agent-runner:latest" }
 
 func (c *Claude) DefaultModel() string { return "sonnet" }

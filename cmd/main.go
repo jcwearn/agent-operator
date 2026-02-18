@@ -298,6 +298,7 @@ func main() {
 		codingTaskReconciler.ApprovalChecker = ghNotifier
 		codingTaskReconciler.PRStatusChecker = ghNotifier
 		codingTaskReconciler.ModelSelectionChecker = ghNotifier
+		codingTaskReconciler.ProviderSelectionChecker = ghNotifier
 	}
 	codingTaskReconciler.Broadcaster = &hubBroadcaster{hub: apiServer.GetHub()}
 

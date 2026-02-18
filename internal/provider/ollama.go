@@ -16,6 +16,12 @@ type Ollama struct {
 
 func (o *Ollama) Name() string { return "ollama" }
 
+func (o *Ollama) DisplayName() string { return "Aider + Ollama" }
+
+func (o *Ollama) ProviderDescription() string {
+	return "Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama"
+}
+
 func (o *Ollama) DefaultImage() string { return "ghcr.io/jcwearn/agent-runner-aider:latest" }
 
 func (o *Ollama) DefaultModel() string { return "qwen2.5:7b" }

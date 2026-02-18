@@ -492,6 +492,7 @@ spec:
                 description: phase is the current workflow phase.
                 enum:
                 - Pending
+                - AwaitingProviderSelection
                 - AwaitingModelSelection
                 - Planning
                 - AwaitingApproval
@@ -522,6 +523,11 @@ spec:
                   used as an anchor for detecting change-request feedback.
                 format: int64
                 type: integer
+              providerSelectionCommentID:
+                description: providerSelectionCommentID is the GitHub comment ID for
+                  provider selection polling.
+                format: int64
+                type: integer
               pullRequest:
                 description: pullRequest contains info about the created PR, if any.
                 properties:
@@ -544,6 +550,15 @@ spec:
                   runTests indicates whether the testing step should run.
                   Set during plan approval based on the checkbox in the plan comment.
                 type: boolean
+              selectedProvider:
+                description: selectedProvider is the provider chosen via interactive
+                  selection on GitHub.
+                enum:
+                - claude
+                - ollama
+                - openai
+                - gemini
+                type: string
               startedAt:
                 description: startedAt is when the task began processing.
                 format: date-time
