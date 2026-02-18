@@ -197,6 +197,12 @@ func main() {
 
 	// Set up provider registry.
 	var registryOpts []provider.RegistryOption
+	if img := os.Getenv("DEFAULT_AGENT_IMAGE"); img != "" {
+		registryOpts = append(registryOpts, provider.WithClaudeImage(img))
+	}
+	if img := os.Getenv("DEFAULT_AIDER_IMAGE"); img != "" {
+		registryOpts = append(registryOpts, provider.WithOllamaImage(img))
+	}
 	if url := os.Getenv("OLLAMA_BASE_URL"); url != "" {
 		registryOpts = append(registryOpts, provider.WithOllamaBaseURL(url))
 	}

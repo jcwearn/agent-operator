@@ -12,6 +12,8 @@ const defaultOllamaBaseURL = "http://ollama.ollama.svc.cluster.local:11434"
 type Ollama struct {
 	// BaseURL overrides the default Ollama endpoint.
 	BaseURL string
+	// Image overrides the default agent-runner-aider image.
+	Image string
 }
 
 func (o *Ollama) Name() string { return "ollama" }
@@ -22,7 +24,12 @@ func (o *Ollama) ProviderDescription() string {
 	return "Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama"
 }
 
-func (o *Ollama) DefaultImage() string { return "ghcr.io/jcwearn/agent-runner-aider:latest" }
+func (o *Ollama) DefaultImage() string {
+	if o.Image != "" {
+		return o.Image
+	}
+	return "ghcr.io/jcwearn/agent-runner-aider:latest"
+}
 
 func (o *Ollama) DefaultModel() string { return "qwen2.5:7b" }
 
