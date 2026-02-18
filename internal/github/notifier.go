@@ -7,17 +7,35 @@ import (
 
 	gogithub "github.com/google/go-github/v82/github"
 	"github.com/jcwearn/agent-operator/internal/controller"
+	"github.com/jcwearn/agent-operator/internal/provider"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const defaultProviderName = "claude"
+
 // Notifier posts status updates to GitHub issues.
 type Notifier struct {
-	client *Client
+	client           *Client
+	providerRegistry *provider.Registry
 }
 
 // NewNotifier creates a new GitHub notifier.
-func NewNotifier(client *Client) *Notifier {
-	return &Notifier{client: client}
+func NewNotifier(client *Client, opts ...NotifierOption) *Notifier {
+	n := &Notifier{client: client}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
+
+// NotifierOption configures the Notifier.
+type NotifierOption func(*Notifier)
+
+// WithProviderRegistry sets the provider registry for dynamic model selection.
+func WithProviderRegistry(r *provider.Registry) NotifierOption {
+	return func(n *Notifier) {
+		n.providerRegistry = r
+	}
 }
 
 // NotifyPlanReady posts the generated plan as a comment and returns the comment ID.
@@ -98,35 +116,10 @@ func (n *Notifier) NotifyRevisedPlan(ctx context.Context, owner, repo string, is
 	return lastID, nil
 }
 
-// NotifyModelSelection posts a model selection comment with checkboxes for each workflow step.
+// NotifyProviderSelection posts a provider selection comment with checkboxes for each provider.
 // Returns the comment ID for polling reactions.
-func (n *Notifier) NotifyModelSelection(ctx context.Context, owner, repo string, issue int) (int64, error) {
-	body := `## Model Selection
-
-Select the Claude model for each workflow step, then react with :+1: to confirm.
-
-### Plan
-- [x] Sonnet 4.5 — balanced speed and capability
-- [ ] Opus 4 — most capable, slower
-- [ ] Haiku 4.5 — fastest, lower cost
-
-### Implement
-- [x] Sonnet 4.5 — balanced speed and capability
-- [ ] Opus 4 — most capable, slower
-- [ ] Haiku 4.5 — fastest, lower cost
-
-### Test
-- [x] Sonnet 4.5 — balanced speed and capability
-- [ ] Opus 4 — most capable, slower
-- [ ] Haiku 4.5 — fastest, lower cost
-
-### Pull Request
-- [x] Haiku 4.5 — fastest, lower cost
-- [ ] Sonnet 4.5 — balanced speed and capability
-- [ ] Opus 4 — most capable, slower
-
----
-**To confirm**, react with :+1: on this comment.`
+func (n *Notifier) NotifyProviderSelection(ctx context.Context, owner, repo string, issue int) (int64, error) {
+	body := n.buildProviderSelectionBody()
 
 	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
 		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
@@ -134,6 +127,191 @@ Select the Claude model for each workflow step, then react with :+1: to confirm.
 		return 0, err
 	}
 	return comment.GetID(), nil
+}
+
+// buildProviderSelectionBody generates the provider selection comment body from the provider registry.
+// Claude is checked by default.
+func (n *Notifier) buildProviderSelectionBody() string {
+	var b strings.Builder
+	b.WriteString("## Agent Selection\n\nChoose the agent framework for this task, then react with :+1: to confirm.\n\n")
+
+	if n.providerRegistry != nil {
+		for _, p := range n.providerRegistry.All() {
+			check := " "
+			if p.Name() == defaultProviderName {
+				check = "x"
+			}
+			b.WriteString(fmt.Sprintf("- [%s] %s — %s\n", check, p.DisplayName(), p.ProviderDescription()))
+		}
+	} else {
+		b.WriteString("- [x] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API\n")
+	}
+
+	b.WriteString("\n---\n**To confirm**, react with :+1: on this comment.")
+	return b.String()
+}
+
+// CheckProviderSelection checks if the provider selection comment has been confirmed via :+1: reaction.
+// If confirmed, it fetches the comment body and parses the checked provider.
+func (n *Notifier) CheckProviderSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (controller.ProviderSelectionResult, error) {
+	reactions, _, err := n.client.Reactions.ListIssueCommentReactions(ctx, owner, repo, commentID,
+		&gogithub.ListReactionOptions{ListOptions: gogithub.ListOptions{PerPage: 100}})
+	if err != nil {
+		return controller.ProviderSelectionResult{}, fmt.Errorf("listing reactions: %w", err)
+	}
+
+	hasThumbsUp := false
+	for _, r := range reactions {
+		if r.GetContent() == "+1" {
+			hasThumbsUp = true
+			break
+		}
+	}
+
+	if !hasThumbsUp {
+		return controller.ProviderSelectionResult{}, nil
+	}
+
+	comment, _, err := n.client.Issues.GetComment(ctx, owner, repo, commentID)
+	if err != nil {
+		return controller.ProviderSelectionResult{Confirmed: true, Provider: defaultProviderName}, nil
+	}
+
+	providerID := n.parseProviderSelection(comment.GetBody())
+	return controller.ProviderSelectionResult{Confirmed: true, Provider: providerID}, nil
+}
+
+// parseProviderSelection finds the checked provider in a provider selection comment body.
+// Returns the provider ID (e.g., "claude", "ollama"). Defaults to "claude" if nothing is checked.
+func (n *Notifier) parseProviderSelection(body string) string {
+	displayNameMap := n.buildProviderDisplayNameMap()
+
+	for line := range strings.SplitSeq(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [x] ") {
+			rest := trimmed[len("- [x] "):]
+			if idx := strings.Index(rest, " — "); idx >= 0 {
+				rest = rest[:idx]
+			}
+			if id, ok := displayNameMap[rest]; ok {
+				return id
+			}
+		}
+	}
+	return defaultProviderName
+}
+
+// buildProviderDisplayNameMap maps provider display names to provider IDs from the registry.
+func (n *Notifier) buildProviderDisplayNameMap() map[string]string {
+	m := make(map[string]string)
+	if n.providerRegistry != nil {
+		for _, p := range n.providerRegistry.All() {
+			m[p.DisplayName()] = p.Name()
+		}
+	}
+	// Always include fallback.
+	if _, ok := m["Claude Code"]; !ok {
+		m["Claude Code"] = defaultProviderName
+	}
+	return m
+}
+
+// NotifyModelSelection posts a model selection comment with checkboxes for each workflow step.
+// If providerName is non-empty, only models from that provider are shown.
+// Returns the comment ID for polling reactions.
+func (n *Notifier) NotifyModelSelection(ctx context.Context, owner, repo string, issue int, providerName string) (int64, error) {
+	body := n.buildModelSelectionBody(providerName)
+
+	comment, _, err := n.client.Issues.CreateComment(ctx, owner, repo, issue,
+		&gogithub.IssueComment{Body: gogithub.Ptr(body)})
+	if err != nil {
+		return 0, err
+	}
+	return comment.GetID(), nil
+}
+
+// buildModelSelectionBody generates the model selection comment body from the provider registry.
+// If providerName is non-empty, only that provider's models are shown.
+func (n *Notifier) buildModelSelectionBody(providerName string) string {
+	var b strings.Builder
+	b.WriteString("## Model Selection\n\nSelect the model for each workflow step, then react with :+1: to confirm.\n")
+
+	steps := []struct {
+		title        string
+		defaultModel string
+	}{
+		{"Plan", ""},
+		{"Implement", ""},
+		{"Test", ""},
+		{"Pull Request", ""},
+	}
+
+	// Collect models, optionally filtered by provider.
+	type providerModels struct {
+		name   string
+		models []provider.ModelInfo
+	}
+	var providers []providerModels
+	if n.providerRegistry != nil {
+		if providerName != "" {
+			// Only show models from the specified provider.
+			if p, err := n.providerRegistry.Get(providerName); err == nil {
+				providers = append(providers, providerModels{name: p.Name(), models: p.AvailableModels()})
+			}
+		} else {
+			for name, p := range n.providerRegistry.All() {
+				providers = append(providers, providerModels{name: name, models: p.AvailableModels()})
+			}
+		}
+	}
+	if len(providers) == 0 {
+		// Fallback: hardcoded Claude models.
+		providers = append(providers, providerModels{
+			name: defaultProviderName,
+			models: []provider.ModelInfo{
+				{ID: "sonnet", DisplayName: "Sonnet 4.5", Description: "balanced speed and capability"},
+				{ID: "opus", DisplayName: "Opus 4", Description: "most capable, slower"},
+				{ID: "haiku", DisplayName: "Haiku 4.5", Description: "fastest, lower cost"},
+			},
+		})
+	}
+
+	// Determine defaults from the target provider.
+	targetProvider := providerName
+	if targetProvider == "" {
+		targetProvider = defaultProviderName
+	}
+	if n.providerRegistry != nil {
+		if p, err := n.providerRegistry.Get(targetProvider); err == nil {
+			steps[0].defaultModel = p.DefaultModelForStep("plan")
+			steps[1].defaultModel = p.DefaultModelForStep("implement")
+			steps[2].defaultModel = p.DefaultModelForStep("test")
+			steps[3].defaultModel = p.DefaultModelForStep("pull-request")
+		}
+	}
+	if steps[0].defaultModel == "" {
+		const fallbackDefault = "sonnet"
+		steps[0].defaultModel = fallbackDefault
+		steps[1].defaultModel = fallbackDefault
+		steps[2].defaultModel = fallbackDefault
+		steps[3].defaultModel = "haiku"
+	}
+
+	for _, step := range steps {
+		b.WriteString(fmt.Sprintf("\n### %s\n", step.title))
+		for _, pm := range providers {
+			for _, m := range pm.models {
+				check := " "
+				if m.ID == step.defaultModel {
+					check = "x"
+				}
+				b.WriteString(fmt.Sprintf("- [%s] %s — %s\n", check, m.DisplayName, m.Description))
+			}
+		}
+	}
+
+	b.WriteString("\n---\n**To confirm**, react with :+1: on this comment.")
+	return b.String()
 }
 
 // CheckModelSelection checks if the model selection comment has been confirmed via :+1: reaction.
@@ -170,21 +348,39 @@ func (n *Notifier) CheckModelSelection(ctx context.Context, owner, repo string, 
 		}, nil
 	}
 
-	result := parseModelSelections(comment.GetBody())
+	result := n.parseModelSelections(comment.GetBody())
 	result.Confirmed = true
 	return result, nil
 }
 
-// modelDisplayNameToAlias maps a display name from the model selection comment to the short alias.
-var modelDisplayNameToAlias = map[string]string{
-	"Sonnet 4.5": "sonnet",
-	"Opus 4":     "opus",
-	"Haiku 4.5":  "haiku",
+// buildDisplayNameMap dynamically builds a display-name-to-ID map from the provider registry.
+func (n *Notifier) buildDisplayNameMap() map[string]string {
+	m := make(map[string]string)
+	if n.providerRegistry != nil {
+		for _, p := range n.providerRegistry.All() {
+			for _, model := range p.AvailableModels() {
+				m[model.DisplayName] = model.ID
+			}
+		}
+	}
+	// Always include hardcoded Claude models as fallback.
+	if _, ok := m["Sonnet 4.5"]; !ok {
+		m["Sonnet 4.5"] = "sonnet"
+	}
+	if _, ok := m["Opus 4"]; !ok {
+		m["Opus 4"] = "opus"
+	}
+	if _, ok := m["Haiku 4.5"]; !ok {
+		m["Haiku 4.5"] = "haiku"
+	}
+	return m
 }
 
 // parseModelSelections parses the checked model selections from a model selection comment body.
 // It splits by "### " headers and finds the first "- [x]" line in each section.
-func parseModelSelections(body string) controller.ModelSelectionResult {
+func (n *Notifier) parseModelSelections(body string) controller.ModelSelectionResult {
+	displayNameMap := n.buildDisplayNameMap()
+
 	result := controller.ModelSelectionResult{
 		Plan:      "sonnet",
 		Implement: "sonnet",
@@ -215,7 +411,7 @@ func parseModelSelections(body string) controller.ModelSelectionResult {
 				if idx := strings.Index(rest, " — "); idx >= 0 {
 					rest = rest[:idx]
 				}
-				if alias, ok := modelDisplayNameToAlias[rest]; ok {
+				if alias, ok := displayNameMap[rest]; ok {
 					model = alias
 					break
 				}

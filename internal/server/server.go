@@ -16,6 +16,8 @@ import (
 
 	anthropicpkg "github.com/jcwearn/agent-operator/internal/anthropic"
 	ghclient "github.com/jcwearn/agent-operator/internal/github"
+	"github.com/jcwearn/agent-operator/internal/openaicompat"
+	"github.com/jcwearn/agent-operator/internal/provider"
 )
 
 // APIServer implements manager.Runnable and serves the HTTP API.
@@ -33,6 +35,11 @@ type APIServer struct {
 
 	// Anthropic client for OpenAI-compatible chat endpoint.
 	anthropicClient *anthropicpkg.Client
+
+	// Ollama/OpenAI-compat client for local model routing.
+	ollamaClient     *openaicompat.Client
+	providerRegistry *provider.Registry
+	chatRouter       *chatRouter
 
 	// Default secret refs for tasks created via API.
 	anthropicSecretName      string
@@ -86,6 +93,21 @@ func WithGitCredentialsSecret(name, key string) Option {
 func WithTaskNamespace(ns string) Option {
 	return func(s *APIServer) {
 		s.taskNamespace = ns
+	}
+}
+
+// WithOllamaClient sets the OpenAI-compatible client for Ollama routing.
+func WithOllamaClient(c *openaicompat.Client) Option {
+	return func(s *APIServer) {
+		s.ollamaClient = c
+	}
+}
+
+// WithProviderRegistry sets the provider registry for model routing and listing.
+func WithProviderRegistry(r *provider.Registry) Option {
+	return func(s *APIServer) {
+		s.providerRegistry = r
+		s.chatRouter = newChatRouter(r)
 	}
 }
 

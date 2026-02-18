@@ -32,6 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
+	"github.com/jcwearn/agent-operator/internal/provider"
 )
 
 // Notifier posts status updates to external systems (e.g., GitHub issues).
@@ -42,7 +43,8 @@ type Notifier interface {
 	NotifyComplete(ctx context.Context, owner, repo string, issue int, prURL string) error
 	NotifyFailed(ctx context.Context, owner, repo string, issue int, reason string) error
 	NotifyAwaitingMerge(ctx context.Context, owner, repo string, issue int, prURL string) (int64, error)
-	NotifyModelSelection(ctx context.Context, owner, repo string, issue int) (int64, error)
+	NotifyProviderSelection(ctx context.Context, owner, repo string, issue int) (int64, error)
+	NotifyModelSelection(ctx context.Context, owner, repo string, issue int, providerName string) (int64, error)
 	CloseIssue(ctx context.Context, owner, repo string, issue int) error
 }
 
@@ -86,6 +88,17 @@ type ModelSelectionChecker interface {
 	CheckModelSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (ModelSelectionResult, error)
 }
 
+// ProviderSelectionResult contains the parsed provider choice from a provider selection comment.
+type ProviderSelectionResult struct {
+	Confirmed bool
+	Provider  string
+}
+
+// ProviderSelectionChecker checks whether provider selection has been confirmed via GitHub reactions.
+type ProviderSelectionChecker interface {
+	CheckProviderSelection(ctx context.Context, owner, repo string, issue int, commentID int64) (ProviderSelectionResult, error)
+}
+
 // Broadcaster publishes real-time task status events (e.g., to WebSocket clients).
 type Broadcaster interface {
 	Broadcast(event BroadcastEvent)
@@ -103,13 +116,15 @@ type BroadcastEvent struct {
 // CodingTaskReconciler reconciles a CodingTask object.
 type CodingTaskReconciler struct {
 	client.Client
-	Scheme                *runtime.Scheme
-	Notifier              Notifier              // optional, nil-safe
-	Broadcaster           Broadcaster           // optional, nil-safe
-	ApprovalChecker       ApprovalChecker       // optional; if nil, plans are auto-approved
-	PRStatusChecker       PRStatusChecker       // optional; if nil, awaiting-merge polling is disabled
-	ModelSelectionChecker ModelSelectionChecker // optional; if nil, model selection is skipped
-	DefaultAgentImage     string                // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
+	Scheme                   *runtime.Scheme
+	Notifier                 Notifier                 // optional, nil-safe
+	Broadcaster              Broadcaster              // optional, nil-safe
+	ApprovalChecker          ApprovalChecker          // optional; if nil, plans are auto-approved
+	PRStatusChecker          PRStatusChecker          // optional; if nil, awaiting-merge polling is disabled
+	ModelSelectionChecker    ModelSelectionChecker    // optional; if nil, model selection is skipped
+	ProviderSelectionChecker ProviderSelectionChecker // optional; if nil, provider selection is skipped
+	DefaultAgentImage        string                   // default agent-runner image; used when CodingTask.Spec.AgentImage is empty
+	ProviderRegistry         *provider.Registry       // provider registry for multi-provider support
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=codingtasks,verbs=get;list;watch;create;update;patch;delete
@@ -145,6 +160,8 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	switch task.Status.Phase {
 	case agentsv1alpha1.TaskPhasePending:
 		return r.handlePending(ctx, &task)
+	case agentsv1alpha1.TaskPhaseAwaitingProviderSelection:
+		return r.handleAwaitingProviderSelection(ctx, &task)
 	case agentsv1alpha1.TaskPhaseAwaitingModelSelection:
 		return r.handleAwaitingModelSelection(ctx, &task)
 	case agentsv1alpha1.TaskPhasePlanning:
@@ -165,20 +182,75 @@ func (r *CodingTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 }
 
-// handlePending posts a model selection comment (for GitHub-sourced tasks) and
-// transitions to AwaitingModelSelection, or skips directly to Planning for
+// handlePending posts a provider selection comment (for GitHub-sourced tasks) and
+// transitions to AwaitingProviderSelection, or skips directly to Planning for
 // non-GitHub tasks or when no Notifier is configured.
 func (r *CodingTaskReconciler) handlePending(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Skip model selection for non-GitHub tasks or when notifier is unavailable.
-	if r.Notifier == nil || task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
-		log.Info("skipping model selection (non-GitHub source or no notifier), going straight to Planning")
+	// Skip provider selection for non-GitHub tasks or when notifier/checker is unavailable.
+	if r.Notifier == nil || r.ProviderSelectionChecker == nil ||
+		task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		log.Info("skipping provider selection (non-GitHub source or no notifier/checker), going straight to Planning")
 		return r.transitionToPlanning(ctx, task)
 	}
 
 	gh := task.Spec.Source.GitHub
-	commentID, err := r.Notifier.NotifyModelSelection(ctx, gh.Owner, gh.Repo, gh.IssueNumber)
+	commentID, err := r.Notifier.NotifyProviderSelection(ctx, gh.Owner, gh.Repo, gh.IssueNumber)
+	if err != nil {
+		log.Error(err, "failed to post provider selection comment, proceeding to Planning")
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	task.Status.Phase = agentsv1alpha1.TaskPhaseAwaitingProviderSelection
+	task.Status.ProviderSelectionCommentID = &commentID
+	task.Status.Message = "Awaiting provider selection"
+	r.broadcast(task)
+
+	if err := r.Status().Update(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// handleAwaitingProviderSelection polls for a :+1: reaction on the provider selection comment.
+// Once confirmed, it stores the selected provider, posts a model selection comment scoped to
+// that provider, and transitions to AwaitingModelSelection.
+func (r *CodingTaskReconciler) handleAwaitingProviderSelection(ctx context.Context, task *agentsv1alpha1.CodingTask) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if task.Status.ProviderSelectionCommentID == nil || r.ProviderSelectionChecker == nil {
+		log.Info("no provider selection comment or checker, proceeding to Planning")
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	if task.Spec.Source.Type != agentsv1alpha1.TaskSourceGitHubIssue || task.Spec.Source.GitHub == nil {
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	gh := task.Spec.Source.GitHub
+	result, err := r.ProviderSelectionChecker.CheckProviderSelection(ctx, gh.Owner, gh.Repo, gh.IssueNumber, *task.Status.ProviderSelectionCommentID)
+	if err != nil {
+		log.Error(err, "failed to check provider selection")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if !result.Confirmed {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	log.Info("provider selection confirmed", "provider", result.Provider)
+	providerType := agentsv1alpha1.ProviderType(result.Provider)
+	task.Status.SelectedProvider = &providerType
+
+	// Post model selection comment scoped to the chosen provider.
+	providerName := result.Provider
+	if r.Notifier == nil {
+		log.Info("no notifier, skipping model selection, going straight to Planning")
+		return r.transitionToPlanning(ctx, task)
+	}
+
+	commentID, err := r.Notifier.NotifyModelSelection(ctx, gh.Owner, gh.Repo, gh.IssueNumber, providerName)
 	if err != nil {
 		log.Error(err, "failed to post model selection comment, proceeding to Planning")
 		return r.transitionToPlanning(ctx, task)
@@ -963,7 +1035,11 @@ func (r *CodingTaskReconciler) modelForStep(task *agentsv1alpha1.CodingTask, ste
 	if m.Default != "" {
 		return m.Default
 	}
-	// Cost-optimized defaults: Haiku for simpler steps, Sonnet for complex ones.
+	// Consult provider for step-specific defaults.
+	if p := r.resolveProvider(task); p != nil {
+		return p.DefaultModelForStep(step)
+	}
+	// Fallback: cost-optimized defaults for Claude.
 	switch step {
 	case agentsv1alpha1.AgentRunStepTest, agentsv1alpha1.AgentRunStepPullRequest:
 		return "haiku"
@@ -1016,11 +1092,36 @@ func (r *CodingTaskReconciler) maxTurnsForStep(task *agentsv1alpha1.CodingTask, 
 	return nil
 }
 
+// resolveProvider returns the provider for a task.
+// Priority: status.SelectedProvider (interactive) → spec.Provider (declarative) → default claude.
+func (r *CodingTaskReconciler) resolveProvider(task *agentsv1alpha1.CodingTask) provider.Provider {
+	if r.ProviderRegistry != nil && task.Status.SelectedProvider != nil && *task.Status.SelectedProvider != "" {
+		if p, err := r.ProviderRegistry.Get(string(*task.Status.SelectedProvider)); err == nil {
+			return p
+		}
+	}
+	if r.ProviderRegistry != nil && task.Spec.Provider != nil && task.Spec.Provider.Name != "" {
+		if p, err := r.ProviderRegistry.Get(string(task.Spec.Provider.Name)); err == nil {
+			return p
+		}
+	}
+	// Default to claude.
+	if r.ProviderRegistry != nil {
+		if p, err := r.ProviderRegistry.Get("claude"); err == nil {
+			return p
+		}
+	}
+	return nil
+}
+
 // agentImage returns the agent-runner image for the given task.
-// It prefers the task-level override, then the operator default, then the CRD default.
+// It prefers the task-level override, then the provider default, then the operator default.
 func (r *CodingTaskReconciler) agentImage(task *agentsv1alpha1.CodingTask) string {
 	if task.Spec.AgentImage != "" {
 		return task.Spec.AgentImage
+	}
+	if p := r.resolveProvider(task); p != nil {
+		return p.DefaultImage()
 	}
 	if r.DefaultAgentImage != "" {
 		return r.DefaultAgentImage
@@ -1041,6 +1142,29 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			"this budget — be focused, avoid unnecessary exploration, and prioritize finishing the task.", *maxTurns)
 	}
 
+	// Resolve provider fields for the AgentRun.
+	// Priority: status.SelectedProvider → spec.Provider → legacy anthropicApiKeyRef.
+	var providerName string
+	var apiKeyRef *agentsv1alpha1.SecretReference
+	var baseURL string
+	if task.Status.SelectedProvider != nil && *task.Status.SelectedProvider != "" {
+		providerName = string(*task.Status.SelectedProvider)
+		// If spec.Provider matches, inherit its apiKeyRef and baseURL.
+		if task.Spec.Provider != nil && task.Spec.Provider.Name == *task.Status.SelectedProvider {
+			apiKeyRef = task.Spec.Provider.APIKeyRef
+			baseURL = task.Spec.Provider.BaseURL
+		} else if providerName == "claude" && task.Spec.AnthropicAPIKeyRef.Name != "" {
+			apiKeyRef = &task.Spec.AnthropicAPIKeyRef
+		}
+	} else if task.Spec.Provider != nil {
+		providerName = string(task.Spec.Provider.Name)
+		apiKeyRef = task.Spec.Provider.APIKeyRef
+		baseURL = task.Spec.Provider.BaseURL
+	} else if task.Spec.AnthropicAPIKeyRef.Name != "" {
+		providerName = "claude"
+		apiKeyRef = &task.Spec.AnthropicAPIKeyRef
+	}
+
 	run := &agentsv1alpha1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      runName,
@@ -1058,6 +1182,9 @@ func (r *CodingTaskReconciler) createAgentRun(ctx context.Context, task *agentsv
 			Timeout:            task.Spec.StepTimeout,
 			Repository:         task.Spec.Repository,
 			Resources:          task.Spec.Resources,
+			Provider:           providerName,
+			APIKeyRef:          apiKeyRef,
+			BaseURL:            baseURL,
 			AnthropicAPIKeyRef: task.Spec.AnthropicAPIKeyRef,
 			GitCredentialsRef:  task.Spec.GitCredentialsRef,
 			ServiceAccountName: task.Spec.ServiceAccountName,

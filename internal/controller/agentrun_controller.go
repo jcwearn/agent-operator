@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/jcwearn/agent-operator/api/v1alpha1"
+	"github.com/jcwearn/agent-operator/internal/provider"
 )
 
 const (
@@ -56,6 +57,7 @@ type AgentRunReconciler struct {
 	Clientset          kubernetes.Interface // for reading pod logs (full output extraction)
 	GitTokenProvider   GitTokenProvider     // optional; if set, injects a fresh token instead of using GitCredentialsRef
 	PodRetentionPeriod time.Duration        // how long to keep succeeded pods; 0 means delete immediately
+	ProviderRegistry   *provider.Registry   // provider registry for multi-provider support
 }
 
 // +kubebuilder:rbac:groups=agents.wearn.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -286,6 +288,9 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 		return nil, fmt.Errorf("building git token env vars: %w", err)
 	}
 
+	// Build provider-specific env vars.
+	providerEnvVars := r.buildProviderEnvVars(run)
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -312,19 +317,7 @@ func (r *AgentRunReconciler) createPod(ctx context.Context, run *agentsv1alpha1.
 					Name:            "agent",
 					Image:           run.Spec.Image,
 					ImagePullPolicy: corev1.PullAlways,
-					Env: append([]corev1.EnvVar{
-						{
-							Name: "ANTHROPIC_API_KEY",
-							ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: run.Spec.AnthropicAPIKeyRef.Name,
-									},
-									Key: run.Spec.AnthropicAPIKeyRef.Key,
-								},
-							},
-						},
-					}, append(gitTokenEnvVars, []corev1.EnvVar{
+					Env: append(providerEnvVars, append(gitTokenEnvVars, []corev1.EnvVar{
 						{Name: "AGENT_STEP", Value: string(run.Spec.Step)},
 						{Name: "AGENT_REPO_URL", Value: run.Spec.Repository.URL},
 						{Name: "AGENT_BASE_BRANCH", Value: run.Spec.Repository.Branch},
@@ -485,6 +478,38 @@ func (r *AgentRunReconciler) extractOutputFromLogs(ctx context.Context, pod *cor
 	// Trim trailing newline that echo adds.
 	output = strings.TrimSuffix(output, "\n")
 	return output, nil
+}
+
+// buildProviderEnvVars returns provider-specific environment variables for the agent pod.
+// If the AgentRun has new-style provider fields, uses the provider registry.
+// Otherwise, falls back to old-style AnthropicAPIKeyRef for backward compatibility.
+func (r *AgentRunReconciler) buildProviderEnvVars(run *agentsv1alpha1.AgentRun) []corev1.EnvVar {
+	// New-style: use provider registry.
+	if run.Spec.Provider != "" && r.ProviderRegistry != nil {
+		p, err := r.ProviderRegistry.Get(run.Spec.Provider)
+		if err == nil {
+			return p.PodEnvVars(run.Spec.APIKeyRef, run.Spec.BaseURL)
+		}
+	}
+
+	// Backward compat: fall back to AnthropicAPIKeyRef.
+	if run.Spec.AnthropicAPIKeyRef.Name != "" {
+		return []corev1.EnvVar{
+			{
+				Name: "ANTHROPIC_API_KEY",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: run.Spec.AnthropicAPIKeyRef.Name,
+						},
+						Key: run.Spec.AnthropicAPIKeyRef.Key,
+					},
+				},
+			},
+		}
+	}
+
+	return nil
 }
 
 // buildGitTokenEnvVars returns the GIT_TOKEN env var (and optionally GITHUB_PAT).

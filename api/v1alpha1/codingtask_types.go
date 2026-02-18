@@ -21,6 +21,34 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ProviderType defines the LLM provider for a task.
+// +kubebuilder:validation:Enum=claude;ollama;openai;gemini
+type ProviderType string
+
+const (
+	ProviderClaude ProviderType = "claude"
+	ProviderOllama ProviderType = "ollama"
+	ProviderOpenAI ProviderType = "openai"
+	ProviderGemini ProviderType = "gemini"
+)
+
+// ProviderSpec configures which LLM provider to use for a task.
+type ProviderSpec struct {
+	// name is the provider identifier (e.g., "claude", "ollama").
+	// +required
+	Name ProviderType `json:"name"`
+
+	// apiKeyRef references the Secret containing the API key.
+	// Not required for providers that don't need API keys (e.g., ollama).
+	// +optional
+	APIKeyRef *SecretReference `json:"apiKeyRef,omitempty"`
+
+	// baseURL overrides the default API endpoint for this provider.
+	// For ollama, defaults to http://ollama.ollama.svc.cluster.local:11434.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+}
+
 // TaskSourceType defines where a task originated from.
 // +kubebuilder:validation:Enum=github-issue;chat
 type TaskSourceType string
@@ -31,20 +59,21 @@ const (
 )
 
 // TaskPhase defines the current phase of a CodingTask.
-// +kubebuilder:validation:Enum=Pending;AwaitingModelSelection;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
+// +kubebuilder:validation:Enum=Pending;AwaitingProviderSelection;AwaitingModelSelection;Planning;AwaitingApproval;Implementing;Testing;PullRequest;AwaitingMerge;Complete;Failed
 type TaskPhase string
 
 const (
-	TaskPhasePending                TaskPhase = "Pending"
-	TaskPhaseAwaitingModelSelection TaskPhase = "AwaitingModelSelection"
-	TaskPhasePlanning               TaskPhase = "Planning"
-	TaskPhaseAwaitingApproval       TaskPhase = "AwaitingApproval"
-	TaskPhaseImplementing           TaskPhase = "Implementing"
-	TaskPhaseTesting                TaskPhase = "Testing"
-	TaskPhasePullRequest            TaskPhase = "PullRequest"
-	TaskPhaseAwaitingMerge          TaskPhase = "AwaitingMerge"
-	TaskPhaseComplete               TaskPhase = "Complete"
-	TaskPhaseFailed                 TaskPhase = "Failed"
+	TaskPhasePending                   TaskPhase = "Pending"
+	TaskPhaseAwaitingProviderSelection TaskPhase = "AwaitingProviderSelection"
+	TaskPhaseAwaitingModelSelection    TaskPhase = "AwaitingModelSelection"
+	TaskPhasePlanning                  TaskPhase = "Planning"
+	TaskPhaseAwaitingApproval          TaskPhase = "AwaitingApproval"
+	TaskPhaseImplementing              TaskPhase = "Implementing"
+	TaskPhaseTesting                   TaskPhase = "Testing"
+	TaskPhasePullRequest               TaskPhase = "PullRequest"
+	TaskPhaseAwaitingMerge             TaskPhase = "AwaitingMerge"
+	TaskPhaseComplete                  TaskPhase = "Complete"
+	TaskPhaseFailed                    TaskPhase = "Failed"
 )
 
 // GitHubSource contains information about a GitHub issue source.
@@ -134,7 +163,7 @@ type SecretReference struct {
 	Key string `json:"key"`
 }
 
-// ModelConfig configures which Claude model to use for each workflow step.
+// ModelConfig configures which model to use for each workflow step.
 type ModelConfig struct {
 	// default is the model used when no step-specific override is set.
 	// +kubebuilder:default="sonnet"
@@ -202,16 +231,22 @@ type CodingTaskSpec struct {
 	// +optional
 	Resources TaskResources `json:"resources,omitempty"`
 
+	// provider configures which LLM provider to use for this task.
+	// If not set, defaults to claude using anthropicApiKeyRef.
+	// +optional
+	Provider *ProviderSpec `json:"provider,omitempty"`
+
 	// anthropicAPIKeyRef references the Secret containing the Anthropic API key.
-	// +required
-	AnthropicAPIKeyRef SecretReference `json:"anthropicApiKeyRef"`
+	// Deprecated: Use provider instead. Kept for backward compatibility.
+	// +optional
+	AnthropicAPIKeyRef SecretReference `json:"anthropicApiKeyRef,omitempty"`
 
 	// gitCredentialsRef references the Secret containing Git credentials (e.g., GitHub token).
 	// Optional when the operator is configured with a GitHub App (tokens are minted automatically).
 	// +optional
 	GitCredentialsRef SecretReference `json:"gitCredentialsRef,omitempty"`
 
-	// model configures which Claude model to use for each workflow step.
+	// model configures which model to use for each workflow step.
 	// +optional
 	Model ModelConfig `json:"model,omitempty"`
 
@@ -317,6 +352,14 @@ type CodingTaskStatus struct {
 	// Used to determine whether to post a collapsed revised plan or a fresh plan.
 	// +optional
 	PlanRevision int `json:"planRevision,omitempty"`
+
+	// providerSelectionCommentID is the GitHub comment ID for provider selection polling.
+	// +optional
+	ProviderSelectionCommentID *int64 `json:"providerSelectionCommentID,omitempty"`
+
+	// selectedProvider is the provider chosen via interactive selection on GitHub.
+	// +optional
+	SelectedProvider *ProviderType `json:"selectedProvider,omitempty"`
 
 	// modelSelectionCommentID is the GitHub comment ID for model selection polling.
 	// +optional

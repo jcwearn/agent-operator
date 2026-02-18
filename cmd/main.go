@@ -42,6 +42,8 @@ import (
 	anthropicpkg "github.com/jcwearn/agent-operator/internal/anthropic"
 	"github.com/jcwearn/agent-operator/internal/controller"
 	ghclient "github.com/jcwearn/agent-operator/internal/github"
+	"github.com/jcwearn/agent-operator/internal/openaicompat"
+	"github.com/jcwearn/agent-operator/internal/provider"
 	"github.com/jcwearn/agent-operator/internal/server"
 	// +kubebuilder:scaffold:imports
 )
@@ -193,6 +195,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Set up provider registry.
+	var registryOpts []provider.RegistryOption
+	if url := os.Getenv("OLLAMA_BASE_URL"); url != "" {
+		registryOpts = append(registryOpts, provider.WithOllamaBaseURL(url))
+	}
+	providerRegistry := provider.NewRegistry(registryOpts...)
+	setupLog.Info("provider registry initialized", "providers", len(providerRegistry.All()))
+
 	// Set up GitHub client if configured via environment variables.
 	var ghClient *ghclient.Client
 	var ghNotifier *ghclient.Notifier
@@ -213,7 +223,7 @@ func main() {
 			setupLog.Error(err, "unable to create GitHub client")
 			os.Exit(1)
 		}
-		ghNotifier = ghclient.NewNotifier(ghClient)
+		ghNotifier = ghclient.NewNotifier(ghClient, ghclient.WithProviderRegistry(providerRegistry))
 		setupLog.Info("GitHub App integration enabled", "appID", appID, "installationID", installationID)
 	}
 
@@ -258,6 +268,17 @@ func main() {
 	anthropicClient := anthropicpkg.NewClient(mgr.GetClient(), anthropicNs, anthropicSecretName, "api-key")
 	apiOpts = append(apiOpts, server.WithAnthropicClient(anthropicClient))
 
+	// Set up Ollama client for chat proxy routing.
+	ollamaProvider, _ := providerRegistry.Get("ollama")
+	if ollamaProvider != nil {
+		ollamaBaseURL := ollamaProvider.DefaultBaseURL()
+		ollamaClient := openaicompat.NewClient(ollamaBaseURL)
+		apiOpts = append(apiOpts, server.WithOllamaClient(ollamaClient))
+		setupLog.Info("Ollama chat proxy enabled", "baseURL", ollamaBaseURL)
+	}
+
+	apiOpts = append(apiOpts, server.WithProviderRegistry(providerRegistry))
+
 	apiServer := server.NewAPIServer(mgr.GetClient(), ":8090", apiOpts...)
 
 	if err := mgr.Add(apiServer); err != nil {
@@ -270,12 +291,14 @@ func main() {
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		DefaultAgentImage: os.Getenv("DEFAULT_AGENT_IMAGE"),
+		ProviderRegistry:  providerRegistry,
 	}
 	if ghNotifier != nil {
 		codingTaskReconciler.Notifier = ghNotifier
 		codingTaskReconciler.ApprovalChecker = ghNotifier
 		codingTaskReconciler.PRStatusChecker = ghNotifier
 		codingTaskReconciler.ModelSelectionChecker = ghNotifier
+		codingTaskReconciler.ProviderSelectionChecker = ghNotifier
 	}
 	codingTaskReconciler.Broadcaster = &hubBroadcaster{hub: apiServer.GetHub()}
 
@@ -296,6 +319,7 @@ func main() {
 		Scheme:             mgr.GetScheme(),
 		Clientset:          clientset,
 		PodRetentionPeriod: podRetention,
+		ProviderRegistry:   providerRegistry,
 	}
 	if ghClient != nil {
 		agentRunReconciler.GitTokenProvider = ghClient
