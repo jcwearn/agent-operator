@@ -47,7 +47,7 @@ func (c *Client) Chat(ctx context.Context, req anthropicpkg.ChatCompletionReques
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -93,13 +93,13 @@ func (c *Client) ChatStream(ctx context.Context, req anthropicpkg.ChatCompletion
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	ch := make(chan StreamEvent, 16)
 	go func() {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		defer close(ch)
 
 		scanner := bufio.NewScanner(resp.Body)

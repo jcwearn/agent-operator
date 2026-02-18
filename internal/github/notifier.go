@@ -173,9 +173,10 @@ func (n *Notifier) buildModelSelectionBody() string {
 			steps[3].defaultModel = claude.DefaultModelForStep("pull-request")
 		}
 	} else {
-		steps[0].defaultModel = "sonnet"
-		steps[1].defaultModel = "sonnet"
-		steps[2].defaultModel = "sonnet"
+		const fallbackDefault = "sonnet"
+		steps[0].defaultModel = fallbackDefault
+		steps[1].defaultModel = fallbackDefault
+		steps[2].defaultModel = fallbackDefault
 		steps[3].defaultModel = "haiku"
 	}
 
