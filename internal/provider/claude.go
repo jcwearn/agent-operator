@@ -7,7 +7,10 @@ import (
 )
 
 // Claude implements the Provider interface for Anthropic's Claude models.
-type Claude struct{}
+type Claude struct {
+	// Image overrides the default agent-runner image.
+	Image string
+}
 
 func (c *Claude) Name() string { return "claude" }
 
@@ -17,7 +20,12 @@ func (c *Claude) ProviderDescription() string {
 	return "Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API"
 }
 
-func (c *Claude) DefaultImage() string { return "ghcr.io/jcwearn/agent-runner:latest" }
+func (c *Claude) DefaultImage() string {
+	if c.Image != "" {
+		return c.Image
+	}
+	return "ghcr.io/jcwearn/agent-runner:latest"
+}
 
 func (c *Claude) DefaultModel() string { return "sonnet" }
 

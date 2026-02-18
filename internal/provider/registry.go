@@ -24,11 +24,49 @@ func NewRegistry(opts ...RegistryOption) *Registry {
 // RegistryOption configures the registry.
 type RegistryOption func(*Registry)
 
+// ollamaProvider returns the Ollama provider from the registry, creating one if needed.
+func ollamaProvider(r *Registry) *Ollama {
+	if p, ok := r.providers["ollama"].(*Ollama); ok {
+		return p
+	}
+	p := &Ollama{}
+	r.providers["ollama"] = p
+	return p
+}
+
+// claudeProvider returns the Claude provider from the registry, creating one if needed.
+func claudeProvider(r *Registry) *Claude {
+	if p, ok := r.providers["claude"].(*Claude); ok {
+		return p
+	}
+	p := &Claude{}
+	r.providers["claude"] = p
+	return p
+}
+
 // WithOllamaBaseURL sets a custom base URL for the Ollama provider.
 func WithOllamaBaseURL(url string) RegistryOption {
 	return func(r *Registry) {
 		if url != "" {
-			r.providers["ollama"] = &Ollama{BaseURL: url}
+			ollamaProvider(r).BaseURL = url
+		}
+	}
+}
+
+// WithOllamaImage sets the default container image for the Ollama/Aider provider.
+func WithOllamaImage(image string) RegistryOption {
+	return func(r *Registry) {
+		if image != "" {
+			ollamaProvider(r).Image = image
+		}
+	}
+}
+
+// WithClaudeImage sets the default container image for the Claude provider.
+func WithClaudeImage(image string) RegistryOption {
+	return func(r *Registry) {
+		if image != "" {
+			claudeProvider(r).Image = image
 		}
 	}
 }
