@@ -19,7 +19,7 @@ set -euo pipefail
 #   AGENT_WORKSPACE_DIR - Directory for the workspace/repo clone
 
 # Optional:
-#   AGENT_MODEL         - Model to use (default: qwen2.5:7b)
+#   AGENT_MODEL         - Model to use (default: qwen2.5:3b)
 #   AGENT_CONTEXT       - Additional context from previous steps
 
 TERMINATION_MESSAGE_PATH="${AGENT_OUTPUT_DIR}/termination-message"
@@ -45,6 +45,98 @@ fail() {
     log "FAILED: $message"
     write_output "FAILED: $message"
     exit 1
+}
+
+handle_pull_request() {
+    log "Handling pull-request step directly (no LLM needed)"
+
+    # Ensure the work branch is pushed to the remote.
+    log "Pushing work branch to remote..."
+    git push -u origin "$AGENT_WORK_BRANCH" 2>&1 || fail "Failed to push work branch"
+
+    # Check if a PR already exists for this branch (retry-safe).
+    EXISTING_PR=$(gh pr view "$AGENT_WORK_BRANCH" --json url --jq '.url' 2>/dev/null || true)
+    if [ -n "$EXISTING_PR" ]; then
+        log "PR already exists: $EXISTING_PR"
+        write_output "$EXISTING_PR"
+        return 0
+    fi
+
+    # Extract PR title from the prompt (look for "Original Task:" line).
+    PR_TITLE=$(echo "$AGENT_PROMPT" | grep -m1 'Original Task:' | sed 's/.*Original Task:\s*//' | head -c 72 || true)
+    if [ -z "$PR_TITLE" ]; then
+        # Fallback: use the first non-empty line of the prompt.
+        PR_TITLE=$(echo "$AGENT_PROMPT" | grep -m1 '.' | head -c 72 || true)
+    fi
+    if [ -z "$PR_TITLE" ]; then
+        PR_TITLE="Agent: changes on $AGENT_WORK_BRANCH"
+    fi
+
+    # Build PR body by parsing structured sections from AGENT_PROMPT.
+    # The operator builds the prompt as:
+    #   Original Task: <description>
+    #   Plan:
+    #   <plan text>
+    #   <newline>Test Results: ...    (optional, inline after plan)
+    #   <newline>Implementation Notes: ...  (optional, inline after plan)
+    #   Instructions:
+    #   ...
+    TASK_DESC=$(echo "$AGENT_PROMPT" | sed -n 's/^Original Task: *//p' | head -1)
+    # Plan sits between "Plan:" and "Instructions:" lines, excluding metadata lines.
+    PLAN_SECTION=$(echo "$AGENT_PROMPT" | awk '
+        /^Plan:$/ { f=1; next }
+        /^Instructions:$/ { f=0; next }
+        /^Test Results:/ { next }
+        /^Implementation Notes:/ { next }
+        f { print }
+    ')
+    TEST_RESULTS=$(echo "$AGENT_PROMPT" | sed -n 's/^Test Results: *//p')
+    IMPL_NOTES=$(echo "$AGENT_PROMPT" | sed -n 's/^Implementation Notes: *//p')
+
+    PR_BODY="Automated PR created by [agent-operator](https://github.com/jcwearn/agent-operator)."
+
+    if [ -n "$TASK_DESC" ]; then
+        PR_BODY="${PR_BODY}
+
+## Task
+
+${TASK_DESC}"
+    fi
+
+    if [ -n "$PLAN_SECTION" ]; then
+        PR_BODY="${PR_BODY}
+
+## Plan
+
+${PLAN_SECTION}"
+    fi
+
+    if [ -n "$TEST_RESULTS" ]; then
+        PR_BODY="${PR_BODY}
+
+## Test Results
+
+${TEST_RESULTS}"
+    fi
+
+    if [ -n "$IMPL_NOTES" ]; then
+        PR_BODY="${PR_BODY}
+
+## Implementation Notes
+
+${IMPL_NOTES}"
+    fi
+
+    log "Creating PR: $PR_TITLE"
+    PR_URL=$(gh pr create \
+        --base "$AGENT_BASE_BRANCH" \
+        --head "$AGENT_WORK_BRANCH" \
+        --title "$PR_TITLE" \
+        --body "$PR_BODY" \
+        2>&1) || fail "gh pr create failed: $PR_URL"
+
+    log "PR created: $PR_URL"
+    write_output "$PR_URL"
 }
 
 # Validate required environment variables.
@@ -103,6 +195,13 @@ case "$AGENT_STEP" in
 esac
 
 log "On branch: $(git branch --show-current)"
+
+# Handle pull-request step directly — no LLM needed.
+if [ "$AGENT_STEP" = "pull-request" ]; then
+    handle_pull_request
+    log "Agent step ${AGENT_STEP} completed successfully"
+    exit 0
+fi
 
 # Build the prompt with context.
 FULL_PROMPT="$AGENT_PROMPT"
@@ -179,9 +278,6 @@ $AIDER_OUTPUT" || true
             log "Tests may have failed - check output"
             exit 0
         fi
-        ;;
-    pull-request)
-        write_output "$AIDER_OUTPUT"
         ;;
 esac
 
