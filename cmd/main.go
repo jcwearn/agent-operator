@@ -200,7 +200,7 @@ func main() {
 	if img := os.Getenv("DEFAULT_AGENT_IMAGE"); img != "" {
 		registryOpts = append(registryOpts, provider.WithClaudeImage(img))
 	}
-	if img := os.Getenv("DEFAULT_AIDER_IMAGE"); img != "" {
+	if img := os.Getenv("DEFAULT_OPENCODE_IMAGE"); img != "" {
 		registryOpts = append(registryOpts, provider.WithOllamaImage(img))
 	}
 	if url := os.Getenv("OLLAMA_BASE_URL"); url != "" {

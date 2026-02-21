@@ -26,7 +26,7 @@ type Provider interface {
 	// Name returns the provider identifier (e.g., "claude", "ollama").
 	Name() string
 
-	// DisplayName returns the human-readable provider name (e.g., "Claude Code", "Aider + Ollama").
+	// DisplayName returns the human-readable provider name (e.g., "Claude Code", "OpenCode + Ollama").
 	DisplayName() string
 
 	// ProviderDescription returns a short description of the provider and its models.

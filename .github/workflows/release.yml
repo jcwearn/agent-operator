@@ -9,7 +9,7 @@ env:
   REGISTRY: ghcr.io
   OPERATOR_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-operator
   RUNNER_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runner
-  AIDER_RUNNER_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runner-aider
+  OPENCODE_RUNNER_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runner-opencode
 
 jobs:
   release:
@@ -170,7 +170,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  build-agent-runner-aider:
+  build-agent-runner-opencode:
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -198,15 +198,15 @@ jobs:
           SEMVER="${VERSION#v}"
           MAJOR_MINOR="${SEMVER%.*}"
           SHORT_SHA=$(git rev-parse --short HEAD)
-          TAGS="${{ env.AIDER_RUNNER_IMAGE }}:${SEMVER}"
-          TAGS="${TAGS},${{ env.AIDER_RUNNER_IMAGE }}:${MAJOR_MINOR}"
-          TAGS="${TAGS},${{ env.AIDER_RUNNER_IMAGE }}:sha-${SHORT_SHA}"
+          TAGS="${{ env.OPENCODE_RUNNER_IMAGE }}:${SEMVER}"
+          TAGS="${TAGS},${{ env.OPENCODE_RUNNER_IMAGE }}:${MAJOR_MINOR}"
+          TAGS="${TAGS},${{ env.OPENCODE_RUNNER_IMAGE }}:sha-${SHORT_SHA}"
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push agent-runner-aider
+      - name: Build and push agent-runner-opencode
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: ./agent-runner-aider
+          context: ./agent-runner-opencode
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha

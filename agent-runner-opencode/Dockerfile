@@ -10,10 +10,15 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     gnupg \
     jq \
-    python3 \
-    python3-pip \
-    python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Node.js (LTS) for OpenCode CLI.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# OpenCode CLI.
+RUN npm install -g opencode-ai
 
 # GitHub CLI.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -28,13 +33,6 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN userdel -r ubuntu 2>/dev/null || true \
     && groupadd -g 1000 agent \
     && useradd -m -u 1000 -g agent agent
-
-# Install Aider in a virtual environment owned by the agent user.
-USER agent
-RUN python3 -m venv /home/agent/.venv \
-    && /home/agent/.venv/bin/pip install --no-cache-dir aider-chat
-ENV PATH="/home/agent/.venv/bin:$PATH"
-USER root
 
 # Create required directories.
 RUN mkdir -p /agent/output /agent/workspace && \

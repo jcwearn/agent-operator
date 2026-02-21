@@ -155,7 +155,7 @@ func TestParseProviderSelection(t *testing.T) {
 Choose the agent framework for this task, then react with :+1: to confirm.
 
 - [x] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API
-- [ ] Aider + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama
+- [ ] OpenCode + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via OpenCode + Ollama
 
 ---
 **To confirm**, react with :+1: on this comment.`,
@@ -168,7 +168,7 @@ Choose the agent framework for this task, then react with :+1: to confirm.
 Choose the agent framework for this task, then react with :+1: to confirm.
 
 - [ ] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API
-- [x] Aider + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama
+- [x] OpenCode + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via OpenCode + Ollama
 
 ---
 **To confirm**, react with :+1: on this comment.`,
@@ -181,7 +181,7 @@ Choose the agent framework for this task, then react with :+1: to confirm.
 Choose the agent framework for this task, then react with :+1: to confirm.
 
 - [ ] Claude Code — Claude models (Sonnet 4.5, Opus 4, Haiku 4.5) via Anthropic API
-- [ ] Aider + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama
+- [ ] OpenCode + Ollama — Local models (Qwen 2.5 7B, 3B, 1.5B) via OpenCode + Ollama
 
 ---
 **To confirm**, react with :+1: on this comment.`,
