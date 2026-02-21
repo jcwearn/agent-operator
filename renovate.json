@@ -2,5 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:best-practices"],
   "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
-  "addLabels": ["release:patch"]
+  "addLabels": ["release:patch"],
+  "packageRules": [
+    {
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ]
 }
