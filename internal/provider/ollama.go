@@ -10,27 +10,27 @@ import (
 
 const defaultOllamaBaseURL = "http://ollama.ollama.svc.cluster.local:11434"
 
-// Ollama implements the Provider interface for local Ollama models via Aider.
+// Ollama implements the Provider interface for local Ollama models via OpenCode.
 type Ollama struct {
 	// BaseURL overrides the default Ollama endpoint.
 	BaseURL string
-	// Image overrides the default agent-runner-aider image.
+	// Image overrides the default agent-runner-opencode image.
 	Image string
 }
 
 func (o *Ollama) Name() string { return "ollama" }
 
-func (o *Ollama) DisplayName() string { return "Aider + Ollama" }
+func (o *Ollama) DisplayName() string { return "OpenCode + Ollama" }
 
 func (o *Ollama) ProviderDescription() string {
-	return "Local models (Qwen 2.5 7B, 3B, 1.5B) via Ollama"
+	return "Local models (Qwen 2.5 7B, 3B, 1.5B) via OpenCode + Ollama"
 }
 
 func (o *Ollama) DefaultImage() string {
 	if o.Image != "" {
 		return o.Image
 	}
-	return "ghcr.io/jcwearn/agent-runner-aider:latest"
+	return "ghcr.io/jcwearn/agent-runner-opencode:latest"
 }
 
 func (o *Ollama) DefaultModel() string { return "qwen2.5:7b" }
@@ -63,7 +63,7 @@ func (o *Ollama) PodEnvVars(_ *agentsv1alpha1.SecretReference, baseURL string) [
 	if url == "" {
 		url = o.DefaultBaseURL()
 	}
-	// Append /v1 so litellm's OpenAI SDK constructs the correct
+	// Append /v1 so the OpenAI-compatible SDK constructs the correct
 	// /v1/chat/completions path against Ollama's OpenAI-compatible endpoint.
 	apiBase := strings.TrimRight(url, "/") + "/v1"
 	return []corev1.EnvVar{

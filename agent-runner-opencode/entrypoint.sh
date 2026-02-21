@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Agent Runner Entrypoint (Aider)
-# This script is the entrypoint for Aider-based agent pods. It adapts behavior
+# Agent Runner Entrypoint (OpenCode)
+# This script is the entrypoint for OpenCode-based agent pods. It adapts behavior
 # based on the AGENT_STEP environment variable (plan, implement, test, pull-request).
-# Same contract as the Claude Code runner, but uses Aider with OpenAI-compatible APIs.
+# Same contract as the Claude Code runner, but uses OpenCode with OpenAI-compatible APIs.
 
 # Required environment variables:
 #   AGENT_STEP          - The workflow step (plan, implement, test, pull-request)
@@ -19,13 +19,13 @@ set -euo pipefail
 #   AGENT_WORKSPACE_DIR - Directory for the workspace/repo clone
 
 # Optional:
-#   AGENT_MODEL         - Model to use (default: qwen2.5:3b)
+#   AGENT_MODEL         - Model to use (default: qwen2.5:7b)
 #   AGENT_CONTEXT       - Additional context from previous steps
 
 TERMINATION_MESSAGE_PATH="${AGENT_OUTPUT_DIR}/termination-message"
 
 log() {
-    echo "[agent-runner-aider] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
+    echo "[agent-runner-opencode] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
 }
 
 write_output() {
@@ -73,16 +73,7 @@ handle_pull_request() {
     fi
 
     # Build PR body by parsing structured sections from AGENT_PROMPT.
-    # The operator builds the prompt as:
-    #   Original Task: <description>
-    #   Plan:
-    #   <plan text>
-    #   <newline>Test Results: ...    (optional, inline after plan)
-    #   <newline>Implementation Notes: ...  (optional, inline after plan)
-    #   Instructions:
-    #   ...
     TASK_DESC=$(echo "$AGENT_PROMPT" | sed -n 's/^Original Task: *//p' | head -1)
-    # Plan sits between "Plan:" and "Instructions:" lines, excluding metadata lines.
     PLAN_SECTION=$(echo "$AGENT_PROMPT" | awk '
         /^Plan:$/ { f=1; next }
         /^Instructions:$/ { f=0; next }
@@ -196,7 +187,7 @@ esac
 
 log "On branch: $(git branch --show-current)"
 
-# Handle pull-request step directly — no LLM needed.
+# Handle pull-request step directly -- no LLM needed.
 if [ "$AGENT_STEP" = "pull-request" ]; then
     handle_pull_request
     log "Agent step ${AGENT_STEP} completed successfully"
@@ -212,51 +203,60 @@ Context from previous steps:
 ${AGENT_CONTEXT}"
 fi
 
-# Build Aider arguments.
-# --yes-always: auto-accept all prompts
-# --no-auto-commits: let us handle git commits
-# --no-auto-lint: skip linting
-# --no-suggest-shell-commands: don't suggest shell commands
-AIDER_ARGS="--message"
-AIDER_MODEL="openai/${AGENT_MODEL}"
+# Generate opencode.json configuration in the repo directory.
+# This configures OpenCode to use the Ollama-compatible endpoint.
+cat > opencode.json <<EOCONFIG
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "${OPENAI_API_BASE}",
+        "apiKey": "${OPENAI_API_KEY}"
+      },
+      "models": {
+        "${AGENT_MODEL}": {}
+      }
+    }
+  },
+  "model": "ollama/${AGENT_MODEL}",
+  "permission": "allow"
+}
+EOCONFIG
 
-log "Running Aider with model: $AIDER_MODEL"
-AIDER_OUTPUT=$(aider \
-    $AIDER_ARGS "$FULL_PROMPT" \
-    --model "$AIDER_MODEL" \
-    --yes-always \
-    --no-auto-commits \
-    --no-auto-lint \
-    --no-suggest-shell-commands \
-    --no-show-model-warnings \
-    --no-pretty \
-    --no-stream \
-    --no-gitignore \
-    2>&1) || {
-    log "Aider exited with non-zero status"
-    write_output "$AIDER_OUTPUT"
+log "Generated opencode.json for model: ollama/${AGENT_MODEL}"
+
+# Build OpenCode run arguments.
+OPENCODE_ARGS=""
+case "$AGENT_STEP" in
+    plan)
+        # Use the read-only plan agent.
+        OPENCODE_ARGS="--agent plan"
+        ;;
+    implement|test)
+        # Use the default build agent (full read/write/bash access).
+        ;;
+esac
+
+log "Running OpenCode with args: run ${OPENCODE_ARGS}"
+OPENCODE_OUTPUT=$(opencode run $OPENCODE_ARGS "$FULL_PROMPT" 2>&1) || {
+    log "OpenCode exited with non-zero status"
+    # Clean up OpenCode internals before writing output.
+    rm -rf .opencode/ opencode.json
+    write_output "$OPENCODE_OUTPUT"
     exit 1
 }
 
-log "Aider completed"
+log "OpenCode completed"
+
+# Clean up OpenCode internals so they are not committed or left in the workspace.
+rm -rf .opencode/ opencode.json
 
 # Post-processing based on step.
 case "$AGENT_STEP" in
     plan)
-        # Filter aider startup noise from plan output.
-        FILTERED_OUTPUT=$(echo "$AIDER_OUTPUT" | grep -v -E \
-            -e '^Aider v' \
-            -e '^Model:' \
-            -e '^Git repo:' \
-            -e '^Repo-map:' \
-            -e '^Use /help' \
-            -e '^https?://' \
-            -e 'Scanning repo' \
-            -e '^\s*$' \
-            -e '^─' \
-            -e '\.aider' \
-            || true)
-        write_output "${FILTERED_OUTPUT:-$AIDER_OUTPUT}"
+        write_output "$OPENCODE_OUTPUT"
         ;;
     implement)
         # Push the work branch with changes.
@@ -264,14 +264,14 @@ case "$AGENT_STEP" in
             git add -A
             git commit -m "agent: implement changes for task
 
-$AIDER_OUTPUT" || true
+$OPENCODE_OUTPUT" || true
         fi
         git push -u origin "$AGENT_WORK_BRANCH"
-        write_output "$AIDER_OUTPUT"
+        write_output "$OPENCODE_OUTPUT"
         ;;
     test)
-        write_output "$AIDER_OUTPUT"
-        if echo "$AIDER_OUTPUT" | grep -qi "ALL TESTS PASSED"; then
+        write_output "$OPENCODE_OUTPUT"
+        if echo "$OPENCODE_OUTPUT" | grep -qi "ALL TESTS PASSED"; then
             log "Tests passed"
             exit 0
         else

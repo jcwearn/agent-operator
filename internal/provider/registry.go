@@ -53,7 +53,7 @@ func WithOllamaBaseURL(url string) RegistryOption {
 	}
 }
 
-// WithOllamaImage sets the default container image for the Ollama/Aider provider.
+// WithOllamaImage sets the default container image for the Ollama/OpenCode provider.
 func WithOllamaImage(image string) RegistryOption {
 	return func(r *Registry) {
 		if image != "" {
