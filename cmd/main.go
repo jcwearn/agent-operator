@@ -202,9 +202,6 @@ func main() {
 	}
 	if img := os.Getenv("DEFAULT_OPENCODE_IMAGE"); img != "" {
 		registryOpts = append(registryOpts, provider.WithOllamaImage(img))
-	} else if img := os.Getenv("DEFAULT_AIDER_IMAGE"); img != "" {
-		// Fall back to legacy env var for backward compatibility.
-		registryOpts = append(registryOpts, provider.WithOllamaImage(img))
 	}
 	if url := os.Getenv("OLLAMA_BASE_URL"); url != "" {
 		registryOpts = append(registryOpts, provider.WithOllamaBaseURL(url))
