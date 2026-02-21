@@ -7,14 +7,15 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
-# Ensure go.sum is complete (Renovate may leave it incomplete due to cache permission issues)
-RUN go mod tidy
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
 
 # Copy the Go source (relies on .dockerignore to filter)
 COPY . .
+
+# Ensure go.sum is complete (Renovate may leave it incomplete due to cache permission issues)
+RUN go mod tidy
 
 # Build
 # the GOARCH has no default value to allow the binary to be built according to the host where the command
