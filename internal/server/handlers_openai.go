@@ -8,7 +8,7 @@ import (
 	"time"
 
 	sdkanthropic "github.com/anthropics/anthropic-sdk-go"
-	gogithub "github.com/google/go-github/v82/github"
+	gogithub "github.com/google/go-github/v83/github"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
