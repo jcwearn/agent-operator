@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	gogithub "github.com/google/go-github/v83/github"
+	gogithub "github.com/google/go-github/v84/github"
 	"github.com/jcwearn/agent-operator/internal/controller"
 	"github.com/jcwearn/agent-operator/internal/provider"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
