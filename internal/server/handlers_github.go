@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	gogithub "github.com/google/go-github/v83/github"
+	gogithub "github.com/google/go-github/v84/github"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
